@@ -16,7 +16,7 @@ from .schema import (
 )
 from .worker import run_worker
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "AgentResult", "Budget", "BudgetPolicy", "Kind", "Ledger", "Memory",

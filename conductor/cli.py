@@ -188,6 +188,47 @@ def cmd_memory(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_quota(args: argparse.Namespace) -> int:
+    from .quota import QuotaMonitor
+
+    plan_path = Path(args.plan).resolve()
+    plan = load_plan(plan_path)
+    snap = QuotaMonitor(ledger=_ledger(plan_path)).snapshot(plan.subscription)
+
+    table = Table(title="subscription quota (burn = in + out + cache-write tokens)")
+    table.add_column("window", style="bold")
+    table.add_column("burn", justify="right")
+    table.add_column("ceiling", justify="right")
+    table.add_column("remaining", justify="right")
+    table.add_column("resets")
+    for w in (snap.five_hour, snap.weekly):
+        rem = f"{w.remaining_fraction:.0%}" if w.remaining_fraction is not None else "—"
+        resets = w.resets_at.astimezone().strftime("%m-%d %H:%M") if w.resets_at else "—"
+        ceiling = f"{w.ceiling:,}" if w.ceiling else "[dim]not set[/dim]"
+        table.add_row(w.name, f"{w.burn:,}", ceiling, rem, resets)
+    console.print(table)
+    if not (plan.subscription.five_hour_tokens or plan.subscription.weekly_tokens):
+        console.print("[yellow]no ceilings configured[/yellow] — watch burn for a few days, "
+                      "then set subscription.five_hour_tokens / weekly_tokens in the plan "
+                      "to enable automatic defer/downgrade for kind=claude tasks")
+    return 0
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    from .ui import serve as ui_serve
+
+    plan_path = Path(args.plan).resolve()
+    plan = load_plan(plan_path)
+    server = ui_serve(plan, plan_path, host=args.host, port=args.port)
+    console.print(f"[bold]conductor ui[/bold] → http://{args.host}:{args.port}  "
+                  f"(plan: {plan_path.name}, refreshes live)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        console.print("bye")
+    return 0
+
+
 def cmd_hub(args: argparse.Namespace) -> int:
     import os
     from .hub import serve
@@ -293,6 +334,16 @@ def main(argv: list[str] | None = None) -> int:
     p_mem.add_argument("-q", "--query", help="recall memories relevant to a query")
     p_mem.add_argument("-k", type=int, default=8, help="max results for --query")
     p_mem.set_defaults(fn=cmd_memory)
+
+    p_quota = sub.add_parser("quota", help="show subscription burn: 5h + weekly windows")
+    p_quota.add_argument("plan", nargs="?", default="plan.yaml")
+    p_quota.set_defaults(fn=cmd_quota)
+
+    p_ui = sub.add_parser("ui", help="open the live dashboard (budget, quota, tasks, memory)")
+    p_ui.add_argument("plan", nargs="?", default="plan.yaml")
+    p_ui.add_argument("--host", default="127.0.0.1")
+    p_ui.add_argument("--port", type=int, default=4748)
+    p_ui.set_defaults(fn=cmd_ui)
 
     args = parser.parse_args(argv)
     try:

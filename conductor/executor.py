@@ -33,6 +33,10 @@ class RunResult:
     actual_usd: float = 0.0
     output_path: Optional[Path] = None
     detail: str = ""
+    retry_after: Optional[dt.datetime] = None  # deferred: earliest sensible retry
+
+
+CLAUDE_MODEL_CHAIN = ["opus", "sonnet", "haiku"]  # subscription downgrade order
 
 
 async def gate_and_run(
@@ -182,13 +186,35 @@ async def _run_claude(plan: Plan, task: Task, ledger: Ledger, outputs_dir: Path)
     memory = MemoryStore(outputs_dir.parent / "memory")
     briefing = memory.briefing(task.prompt_text()) if task.memory else ""
 
+    # quota gate: rolling 5h + weekly windows vs the plan's calibrated ceilings
+    from .quota import QuotaMonitor
+    model_override: Optional[str] = None
+    ok, worst = QuotaMonitor(ledger=ledger).gate(plan.subscription)
+    if not ok and worst is not None:
+        frac = f"{(worst.remaining_fraction or 0) * 100:.0f}%"
+        why = f"{worst.name} window at {frac} remaining (reserve {plan.subscription.reserve:.0%})"
+        if task.on_budget_exceeded == BudgetPolicy.skip:
+            return RunResult(Outcome.skipped, detail=f"quota: {why}; policy=skip")
+        if task.on_budget_exceeded == BudgetPolicy.downgrade:
+            current = task.claude_model or "sonnet"
+            idx = CLAUDE_MODEL_CHAIN.index(current) if current in CLAUDE_MODEL_CHAIN else 1
+            if idx + 1 < len(CLAUDE_MODEL_CHAIN):
+                model_override = CLAUDE_MODEL_CHAIN[idx + 1]
+            else:
+                return RunResult(Outcome.deferred, retry_after=worst.resets_at,
+                                 detail=f"quota: {why}; already at cheapest model")
+        else:  # defer until the window frees up
+            return RunResult(Outcome.deferred, retry_after=worst.resets_at,
+                             detail=f"quota: {why}")
+
     if task.runs_on:
         base = hub_url(plan)
         if not base:
             return RunResult(Outcome.failed,
                              detail=f"runs_on={task.runs_on} but no mesh.hub / $CONDUCTOR_HUB")
         # briefing text travels; the remember-dir is local-only, so skip it remotely
-        payload = build_claude_payload(task, briefing=briefing, memory_dir=None)
+        payload = build_claude_payload(task, briefing=briefing, memory_dir=None,
+                                       model_override=model_override)
         try:
             item = await dispatch_and_wait(base, task, "claude", payload)
         except Exception as exc:
@@ -196,24 +222,32 @@ async def _run_claude(plan: Plan, task: Task, ledger: Ledger, outputs_dir: Path)
         res = item.get("result") or {}
     else:
         workspace = task.workspace or outputs_dir.parent.parent
-        payload = build_claude_payload(task, briefing=briefing, memory_dir=memory.dir)
+        payload = build_claude_payload(task, briefing=briefing, memory_dir=memory.dir,
+                                       model_override=model_override)
         res = await asyncio.to_thread(run_claude, payload, str(workspace))
         item = {"result": res, "status": "error" if res.get("is_error") else "done"}
 
+    effective_model = model_override or task.claude_model or "default"
     reported = res.get("reported_cost_usd", 0.0)
     if res.get("usage"):
-        # $0 against the budget (subscription); tokens + reported cost kept for observability
-        ledger.add(task.id, f"claude-code/{task.claude_model or 'default'}", 0.0,
-                   {**res["usage"], "reported_cost_usd": reported,
-                    "num_turns": res.get("num_turns", 0)})
+        # $0 against the budget (subscription); tokens + reported cost kept for
+        # observability — and, for remote runs, for the quota monitor ("node" marks
+        # entries that local transcripts don't already cover)
+        usage = {**res["usage"], "reported_cost_usd": reported,
+                 "num_turns": res.get("num_turns", 0)}
+        if task.runs_on:
+            usage["node"] = task.runs_on
+        ledger.add(task.id, f"claude-code/{effective_model}", 0.0, usage)
 
-    out_path = write_remote_output(outputs_dir, task, item, 0.0, task.claude_model or "claude-code")
+    out_path = write_remote_output(outputs_dir, task, item, 0.0, effective_model)
     where = f"on {task.runs_on}" if task.runs_on else "local"
     if item["status"] != "done" or res.get("is_error"):
         return RunResult(Outcome.failed, output_path=out_path,
                          detail=res.get("error") or f"claude run failed ({where})")
     detail = (f"{where} · subscription (reported ${reported:.4f}, not billed) · "
               f"{res.get('num_turns', 0)} turns")
+    if model_override:
+        detail += f" · quota-downgraded {task.claude_model or 'default'} → {model_override}"
     return RunResult(Outcome.done, actual_usd=0.0, output_path=out_path, detail=detail)
 
 

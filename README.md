@@ -187,7 +187,44 @@ tasks:
   No `ANTHROPIC_API_KEY` anywhere.
 - **Budget**: exempt from the USD gate (you already paid). The CLI-reported
   cost and token usage still land in the ledger at $0 for observability.
-  Your plan's rate windows are the real constraint.
+  Your plan's rate windows are the real constraint — see quota below.
+
+### Quota-aware scheduling (the subscription budget gate)
+
+Your plan's real limits are the **rolling 5-hour window** and the **weekly
+window**. conductor estimates live burn the way the OSS ecosystem does
+(ccusage-style): by aggregating the usage entries Claude Code writes to its
+local transcripts, plus worker-reported usage from remote nodes. Give it
+ceilings and the scheduler handles the rest:
+
+```yaml
+subscription:
+  five_hour_tokens: 6000000     # burn units = in + out + cache-write tokens
+  weekly_tokens: 300000000      # run `conductor quota` for a few days to calibrate
+  reserve: 0.15                 # headroom kept for YOUR interactive use
+```
+
+When a window drops below the reserve, each `kind: claude` task's own
+`on_budget_exceeded` policy decides:
+
+- `defer` — wait; the scheduler retries **exactly when the window resets** (not blind polling)
+- `downgrade` — step the model down (opus → sonnet → haiku) and run anyway
+- `skip` — drop this run
+
+`conductor quota` shows current burn, ceilings, and reset times. Unset
+ceilings never gate — observe first, then calibrate.
+
+### Dashboard
+
+```bash
+conductor ui        # → http://127.0.0.1:4748
+```
+
+A live, zero-dependency observability dashboard: USD budget burndown,
+subscription quota gauges with reset countdowns, task states, recent runs,
+and everything the agent has learned (long-term memory) — auto-refreshing,
+styled like the brand. This is where "my agents worked while I slept"
+becomes visible.
 - **Memory**: the recall briefing is injected via `--append-system-prompt`,
   and if the task has a write-capable tool, it's instructed to save lessons
   into the same `.conductor/memory/` store the built-in agent uses.
@@ -329,7 +366,8 @@ tasks:
 - [ ] Budget-pressure optimizer: `(priority × value) / cost` knapsack
 - [ ] Claude Code / Agent SDK executor for tool-using tasks
 - [ ] MCP tool surface — let Claude schedule its own future work
-- [ ] Textual TUI dashboard
+- [x] Quota-aware scheduling: 5h + weekly subscription windows, auto defer/downgrade
+- [x] Live web dashboard (`conductor ui`)
 
 ## License
 

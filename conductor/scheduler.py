@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -53,7 +54,24 @@ class Scheduler:
         self.client = client or AsyncAnthropic()
         self.state: dict[str, State] = {t.id: State.pending for t in plan.tasks}
         self._running: set[asyncio.Task] = set()
-        self._defer_until: dict[str, dt.datetime] = {}  # budget-deferred backoff
+        self._defer_until: dict[str, dt.datetime] = {}  # budget/quota-deferred backoff
+        self.state_path: Optional[Path] = outputs_dir.parent / "state.json"
+        self._write_state()
+
+    def _write_state(self) -> None:
+        """Persist run state for observers (the `conductor ui` dashboard)."""
+        if not self.state_path:
+            return
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "updated_at": dt.datetime.now().astimezone().isoformat(),
+                "tasks": {tid: s.value for tid, s in self.state.items()},
+                "defer_until": {tid: t.isoformat() for tid, t in self._defer_until.items()},
+            }
+            self.state_path.write_text(json.dumps(payload, indent=2))
+        except OSError:
+            pass
 
     # -- helpers -----------------------------------------------------------
 
@@ -104,6 +122,7 @@ class Scheduler:
 
     async def _run_one(self, task: Task) -> None:
         self.state[task.id] = State.running
+        self._write_state()
         what = {"llm": f"model={task.model}", "claude": "claude·subscription"}.get(
             task.kind.value, "shell")
         if task.runs_on:
@@ -119,14 +138,22 @@ class Scheduler:
             self._log(task.id, "done", detail)
         elif result.outcome is Outcome.deferred:
             self.state[task.id] = State.pending  # retry after backoff
-            self._defer_until[task.id] = dt.datetime.now() + dt.timedelta(seconds=self.tick_seconds)
-            self._log(task.id, "deferred", f"est ${result.est_usd:.4f} > remaining budget")
+            until = dt.datetime.now() + dt.timedelta(seconds=self.tick_seconds)
+            if result.retry_after is not None:
+                ra = result.retry_after
+                if ra.tzinfo is not None:
+                    ra = ra.astimezone().replace(tzinfo=None)
+                until = max(until, ra)
+            self._defer_until[task.id] = until
+            why = result.detail or f"est ${result.est_usd:.4f} > remaining budget"
+            self._log(task.id, "deferred", f"{why} · retry {until.strftime('%H:%M')}")
         elif result.outcome is Outcome.skipped:
             self.state[task.id] = State.skipped
             self._log(task.id, "skipped", result.detail)
         else:
             self.state[task.id] = State.failed
             self._log(task.id, "failed", result.detail)
+        self._write_state()
 
     def _dispatch(self, tasks: list[Task]) -> None:
         for t in tasks:
@@ -150,6 +177,7 @@ class Scheduler:
         while True:
             now = dt.datetime.now().time()
             eligible = self._eligible(now)
+            self._write_state()  # _eligible can expire/skip tasks
             if once:
                 eligible = [t for t in eligible if t.id not in dispatched]
 

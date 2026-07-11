@@ -136,11 +136,22 @@ class Mesh(BaseModel):
     hub: Optional[str] = None  # e.g. http://100.64.0.3:4747 (falls back to $CONDUCTOR_HUB)
 
 
+class Subscription(BaseModel):
+    """Quota ceilings for `kind: claude` tasks (burn units = in+out+cache-write
+    tokens). Anthropic doesn't publish absolute per-plan numbers — run
+    `conductor quota` for a few days and calibrate. Unset ceilings never gate."""
+    five_hour_tokens: Optional[int] = Field(default=None, gt=0)
+    weekly_tokens: Optional[int] = Field(default=None, gt=0)
+    # keep this fraction as headroom for your own interactive use
+    reserve: float = Field(default=0.15, ge=0.0, lt=1.0)
+
+
 class Plan(BaseModel):
     budget: Budget
     models: dict[str, ModelSpec]
     tasks: list[Task]
     mesh: Mesh = Field(default_factory=Mesh)
+    subscription: Subscription = Field(default_factory=Subscription)
 
     @model_validator(mode="after")
     def _cross_check(self) -> "Plan":

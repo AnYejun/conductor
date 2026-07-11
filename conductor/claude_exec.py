@@ -98,8 +98,10 @@ def run_claude(payload: dict[str, Any], workdir: Optional[str] = None) -> dict[s
     }
 
 
-def build_payload(task: Any, briefing: str = "", memory_dir: Optional[Path] = None) -> dict[str, Any]:
-    """Task → wire payload (also used for mesh dispatch)."""
+def build_payload(task: Any, briefing: str = "", memory_dir: Optional[Path] = None,
+                  model_override: Optional[str] = None) -> dict[str, Any]:
+    """Task → wire payload (also used for mesh dispatch). model_override lets the
+    quota gate downgrade the model without mutating the task."""
     payload: dict[str, Any] = {
         "task_id": task.id,
         "prompt": task.prompt_text(),
@@ -107,8 +109,9 @@ def build_payload(task: Any, briefing: str = "", memory_dir: Optional[Path] = No
     }
     if task.system:
         payload["system"] = task.system
-    if task.claude_model:
-        payload["claude_model"] = task.claude_model
+    effective_model = model_override or task.claude_model
+    if effective_model:
+        payload["claude_model"] = effective_model
     if task.claude_tools:
         payload["claude_tools"] = task.claude_tools
     if briefing:

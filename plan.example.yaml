@@ -5,6 +5,14 @@ budget:
   daily_usd: 5.00
   hourly_usd: 1.00   # optional; rolling 60 minutes
 
+# Optional subscription quota — the budget gate for kind=claude tasks.
+# Burn is estimated from Claude Code's local transcripts (+ mesh workers).
+# Watch `conductor quota` for a few days, then set ceilings; unset = observe only.
+# subscription:
+#   five_hour_tokens: 6000000
+#   weekly_tokens: 300000000
+#   reserve: 0.15               # headroom kept for your interactive use
+
 # Optional compute mesh — use your own machines as execution nodes.
 # Run `conductor hub` on one reachable machine (tailnet address recommended)
 # and `conductor worker --hub <url> [--allow-shell]` on each device.
