@@ -1,8 +1,6 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="conductor — the metronome that watches your spend" width="140">
+  <img src="assets/lockup.svg" alt="conductor — ceci n'est pas un cron." width="560">
 </p>
-
-<h1 align="center">conductor</h1>
 
 <p align="center"><b>Put your Claude to work — on a schedule, on a budget, on your own machines.</b></p>
 
