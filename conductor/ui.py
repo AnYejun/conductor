@@ -108,13 +108,14 @@ def collect_state(plan: Plan, plan_path: Path) -> dict[str, Any]:
             "source": "inbox" if t.id in inbox_ids else "plan",
         })
 
-    # actionable health signal: did a claude task fail because the machine
-    # isn't logged in? (the single most common first-run snag)
-    login_needed = any(
-        t["kind"] == "claude" and t["state"] == "failed"
-        and ("login" in t["detail"].lower() or "authentication" in t["detail"].lower())
-        for t in tasks
+    # actionable health signals for claude-task failures (first-run snags)
+    failed_claude = [t for t in tasks if t["kind"] == "claude" and t["state"] == "failed"]
+    claude_missing = any("not found" in t["detail"].lower() for t in failed_claude)
+    login_needed = (not claude_missing) and any(
+        "authentication" in t["detail"].lower() or "/login" in t["detail"].lower()
+        for t in failed_claude
     )
+    has_failed = any(t["state"] in ("failed", "expired") for t in tasks)
 
     # ledger recents + totals
     recents = [{
@@ -138,7 +139,50 @@ def collect_state(plan: Plan, plan_path: Path) -> dict[str, Any]:
         "hub": plan.mesh.hub,
         "nodes": _hub_nodes(plan.mesh.hub),
         "login_needed": login_needed,
+        "claude_missing": claude_missing,
+        "has_failed": has_failed,
     }
+
+
+def request_retry(plan_path: Path, ids: Optional[list[str]] = None) -> list[str]:
+    """Queue failed/expired/skipped tasks for retry — the scheduler consumes
+    .conductor/control.json on its next tick (same process or not)."""
+    state_dir = plan_path.parent / ".conductor"
+    if ids is None:
+        run_state: dict[str, Any] = {}
+        sf = state_dir / "state.json"
+        if sf.exists():
+            try:
+                run_state = json.loads(sf.read_text())
+            except json.JSONDecodeError:
+                pass
+        ids = [tid for tid, s in (run_state.get("tasks") or {}).items()
+               if s in ("failed", "expired", "skipped")]
+    if not ids:
+        return []
+    ctl = state_dir / "control.json"
+    existing: dict[str, Any] = {}
+    if ctl.exists():
+        try:
+            existing = json.loads(ctl.read_text())
+        except json.JSONDecodeError:
+            pass
+    merged = sorted(set(existing.get("retry", [])) | set(ids))
+    ctl.parent.mkdir(parents=True, exist_ok=True)
+    ctl.write_text(json.dumps({"retry": merged}))
+    return merged
+
+
+def open_terminal_login() -> None:
+    """macOS: open Terminal and type `claude /login` for the user — the
+    in-app sign-in pipeline. (The OAuth itself still happens in their browser;
+    we just save them the terminal gymnastics.)"""
+    import subprocess
+    import sys
+    if sys.platform != "darwin":
+        raise RuntimeError("in-app sign-in is macOS-only for now")
+    script = 'tell application "Terminal"\nactivate\ndo script "claude /login"\nend tell'
+    subprocess.run(["osascript", "-e", script], capture_output=True, timeout=15, check=True)
 
 
 def _hub_nodes(hub: Optional[str]) -> list[dict[str, Any]]:
@@ -202,6 +246,8 @@ body.app main{padding-top:48px}
 .banner{display:flex;align-items:center;gap:12px;background:var(--gold);border:3px solid var(--ink);border-radius:14px;padding:13px 18px;margin-bottom:18px;font-size:14px}
 .banner b{font-weight:700}
 .banner code{background:#fff}
+.bbtn{font:inherit;font-size:13px;font-weight:700;padding:6px 14px;border:2.5px solid var(--ink);border-radius:10px;background:#fff;cursor:pointer;white-space:nowrap}
+.bbtn:hover{background:var(--teal)}
 .view{display:none;max-width:960px;margin:0 auto}
 .view.active{display:block}
 .vtitle{font-size:24px;font-weight:700;letter-spacing:-.4px;margin-bottom:4px}
@@ -380,6 +426,20 @@ async function unschedule(id){
   if(!confirm(`remove "${id}" from the inbox?`))return;
   await fetch("/api/tasks/"+encodeURIComponent(id),{method:"DELETE"});tick();
 }
+async function retryTask(id){
+  await fetch("/api/retry",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ids:[id]})});
+  tick();
+}
+async function retryFailed(btn){
+  if(btn){btn.textContent="queued ✓";setTimeout(()=>btn.textContent="retry failed ↻",2500);}
+  await fetch("/api/retry",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+  tick();
+}
+async function claudeLogin(btn){
+  if(btn){btn.textContent="opening Terminal…";setTimeout(()=>btn.textContent="sign in →",4000);}
+  const r=await fetch("/api/claude-login",{method:"POST"});
+  if(!r.ok){const d=await r.json();alert(d.error||"could not open Terminal");}
+}
 kindswap("claude");
 async function tick(){
   let d;try{d=await (await fetch("/api/state")).json()}catch(e){return}
@@ -404,8 +464,13 @@ async function tick(){
     `<b>2.</b> Grab the zero-install worker: <code>conductor node-script -o conductor_worker.py</code>, copy it to any machine (a home server, an OrbStack Linux VM, a friend's box — just needs Python 3, no pip).<br>`+
     `<b>3.</b> There, <code>claude /login</code> once, then <code>python3 conductor_worker.py --hub ${d.hub?esc(d.hub):"http://&lt;ip&gt;:4747"} --node home --allow-shell</code><br>`+
     `<b>4.</b> Schedule any task with <b>runs on = home</b> — it runs there, on that machine's own Claude login. Your credentials never leave it.`;
-  document.getElementById("banner").innerHTML=d.login_needed?
-    `<div class="banner"><span style="font-size:20px">⚑</span><div>A <b>claude</b> task failed because this machine isn't signed in. Run <code>claude /login</code> in a terminal, then the scheduler will retry automatically.</div></div>`:"";
+  const bannerBtns=`<span style="flex:none;margin-left:auto;display:flex;gap:8px">
+    <button class="bbtn" onclick="claudeLogin(this)">sign in →</button>
+    <button class="bbtn" onclick="retryFailed(this)">retry failed ↻</button></span>`;
+  document.getElementById("banner").innerHTML=
+    d.claude_missing?`<div class="banner"><span style="font-size:20px">⚑</span><div>The <b>claude</b> CLI wasn't found on this machine. Install Claude Code first, then retry.</div>${bannerBtns}</div>`:
+    d.login_needed?`<div class="banner"><span style="font-size:20px">⚑</span><div>A <b>claude</b> task failed because this machine isn't signed in. Click <b>sign in</b> — I'll open Terminal and type <code>claude /login</code> for you — finish in the browser, then hit <b>retry</b>.</div>${bannerBtns}</div>`:
+    d.has_failed?`<div class="banner"><span style="font-size:20px">⚑</span><div>Some tasks failed — details in the tasks view.</div>${bannerBtns}</div>`:"";
   const cnt={};d.tasks.forEach(t=>cnt[t.state]=(cnt[t.state]||0)+1);
   document.getElementById("counts").innerHTML=["done","running","pending","failed"].map(s=>
     `<div class="stat"><b>${cnt[s]||0}</b><span>${s}</span></div>`).join("")+
@@ -423,8 +488,9 @@ async function tick(){
     d.tasks.map(t=>`<tr><td><b>${esc(t.id)}</b>${t.agentic?' <span class="tag">agentic</span>':''}${t.source==="inbox"?' <span class="tag" style="background:var(--gold)">inbox</span>':''}</td>
     <td><span class="chip ${t.kind==="claude"?"k-claude":""}">${esc(t.kind)}${t.model?" · "+esc(t.model):""}</span></td>
     <td>${esc(t.runs_on||"local")}</td><td>${esc(t.window)}</td>
-    <td>${t.depends_on.map(esc).join(", ")||"—"}</td><td>${chip(t.state)}</td>
-    <td>${t.source==="inbox"?`<button class="del" onclick="unschedule('${esc(t.id)}')" title="remove from inbox">✕</button>`:""}</td></tr>`).join("")+"</table>":'<div class="empty">no tasks in plan</div>';
+    <td>${t.depends_on.map(esc).join(", ")||"—"}</td>
+    <td>${chip(t.state)}${t.detail&&(t.state==="failed"||t.state==="skipped")?`<br><span class="muted" style="font-size:11.5px">${esc(t.detail.slice(0,90))}</span>`:""}</td>
+    <td style="white-space:nowrap">${["failed","expired","skipped"].includes(t.state)?`<button class="del" onclick="retryTask('${esc(t.id)}')" title="retry">↻</button>`:""}${t.source==="inbox"?`<button class="del" onclick="unschedule('${esc(t.id)}')" title="remove from inbox">✕</button>`:""}</td></tr>`).join("")+"</table>":'<div class="empty">no tasks in plan</div>';
   document.getElementById("ledger").innerHTML=d.ledger.length?`<table><tr><th>when</th><th>task</th><th>tok in/out</th><th>cost</th></tr>`+
     d.ledger.map(e=>`<tr><td class="muted">${new Date(e.ts).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</td>
     <td><b>${esc(e.task_id)}</b><br><span class="muted">${esc(e.model)}</span></td>
@@ -472,15 +538,29 @@ def make_handler(plan_path: Path):
 
         def do_POST(self) -> None:
             path = self.path.partition("?")[0]
-            if path != "/api/tasks":
-                return self._json(404, {})
-            try:
-                n = int(self.headers.get("Content-Length") or 0)
-                raw = json.loads(self.rfile.read(n) or b"{}")
-                task = add_inbox_task(plan_path, raw)
-                return self._json(201, {"ok": True, "id": task.id})
-            except Exception as exc:
-                return self._json(400, {"error": str(exc)})
+            if path == "/api/tasks":
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    raw = json.loads(self.rfile.read(n) or b"{}")
+                    task = add_inbox_task(plan_path, raw)
+                    return self._json(201, {"ok": True, "id": task.id})
+                except Exception as exc:
+                    return self._json(400, {"error": str(exc)})
+            if path == "/api/retry":
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(n) or b"{}")
+                    queued = request_retry(plan_path, body.get("ids"))
+                    return self._json(200, {"ok": True, "queued": queued})
+                except Exception as exc:
+                    return self._json(400, {"error": str(exc)})
+            if path == "/api/claude-login":
+                try:
+                    open_terminal_login()
+                    return self._json(200, {"ok": True})
+                except Exception as exc:
+                    return self._json(400, {"error": str(exc)})
+            return self._json(404, {})
 
         def do_DELETE(self) -> None:
             path = self.path.partition("?")[0]

@@ -102,3 +102,55 @@ def test_http_schedule_roundtrip(plan_file: Path):
         assert httpx.delete(f"{url}/api/tasks/base-task").status_code == 409
     finally:
         server.shutdown()
+
+
+def test_control_retry_resets_failed(plan_file: Path, tmp_path: Path):
+    """Dashboard retry: control.json flips failed → pending, then is consumed."""
+    import json
+
+    from conductor.ledger import Ledger
+    from conductor.scheduler import Scheduler, State
+    from conductor.ui import request_retry
+
+    plan = load_plan(plan_file)
+    sched = Scheduler(plan, Ledger(tmp_path / "l.json"),
+                      outputs_dir=plan_file.parent / ".conductor" / "outputs",
+                      tick_seconds=1, plan_path=plan_file)
+    sched.state["base-task"] = State.failed
+    sched._write_state()
+
+    queued = request_retry(plan_file)          # no ids → everything failed
+    assert queued == ["base-task"]
+    ctl = plan_file.parent / ".conductor" / "control.json"
+    assert ctl.exists()
+
+    sched._apply_control()
+    assert sched.state["base-task"] is State.pending
+    assert not ctl.exists()                     # consumed
+
+    # explicit ids merge into an existing control file
+    request_retry(plan_file, ["base-task"])
+    request_retry(plan_file, ["base-task"])
+    data = json.loads(ctl.read_text())
+    assert data["retry"] == ["base-task"]
+
+
+def test_http_retry_endpoint(plan_file: Path):
+    import json as _json
+
+    state_dir = plan_file.parent / ".conductor"
+    state_dir.mkdir(exist_ok=True)
+    (state_dir / "state.json").write_text(_json.dumps(
+        {"tasks": {"base-task": "failed"}, "details": {}}))
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(plan_file))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        r = httpx.post(f"{url}/api/retry", json={})
+        assert r.status_code == 200 and r.json()["queued"] == ["base-task"]
+        assert (state_dir / "control.json").exists()
+        state = httpx.get(f"{url}/api/state").json()
+        assert state["has_failed"] is True
+    finally:
+        server.shutdown()

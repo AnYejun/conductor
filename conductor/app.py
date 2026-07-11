@@ -76,7 +76,6 @@ def _scheduler_forever(plan_path: Path) -> None:
     from rich.console import Console
 
     from .ledger import Ledger
-    from .schema import load_inbox_tasks
     from .scheduler import Scheduler
 
     state_dir = plan_path.parent / ".conductor"
@@ -92,19 +91,9 @@ def _scheduler_forever(plan_path: Path) -> None:
                 outputs_dir=state_dir / "outputs",
                 console=console, tick_seconds=30, plan_path=plan_path,
             )
-            known = set(sched.state)
-            day = dt.date.today()
-            asyncio.run(sched.run())
-            log.flush()
-            # settled — wake on a new day (windows re-run) or new inbox work
-            while dt.date.today() == day:
-                try:
-                    fresh = load_inbox_tasks(load_plan(plan_path, include_inbox=False), plan_path)
-                except Exception:
-                    fresh = []
-                if any(t.id not in known for t in fresh):
-                    break
-                time.sleep(30)
+            # serve mode: never returns — handles dashboard retries, inbox
+            # pickup, and daily re-runs internally
+            asyncio.run(sched.run(serve=True))
         except Exception as exc:  # keep the app alive whatever the plan does
             console.print(f"[red]scheduler error:[/red] {exc}")
             log.flush()
@@ -134,9 +123,19 @@ def run_app(plan_path: Path, port: int = 0, embed_scheduler: bool = False) -> in
         background_color="#FDF6E3",
         easy_drag=False,  # we drive dragging via CSS drag regions + movable background
     )
+    log_path = plan_path.parent / ".conductor" / "app.log"
+
+    def _chrome_log(msg: str) -> None:
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a") as f:
+                f.write(f"{dt.datetime.now().strftime('%H:%M:%S')} chrome   {msg}\n")
+        except OSError:
+            pass
+
     # apply native chrome once the window is realized (reliable timing)
     try:
-        window.events.shown += lambda: _apply_native_chrome(window)
+        window.events.shown += lambda: _apply_native_chrome(window, _chrome_log)
     except Exception:
         pass
     webview.start()  # blocks until the window closes
@@ -144,32 +143,38 @@ def run_app(plan_path: Path, port: int = 0, embed_scheduler: bool = False) -> in
     return 0
 
 
-def _apply_native_chrome(window) -> None:
+def _apply_native_chrome(window, log) -> None:
     """macOS: unified titlebar — transparent, full-size content, hidden title,
-    so the traffic lights sit on the cream canvas (OrbStack-style). Dragging the
-    background moves the window. No-op on any platform it can't apply."""
+    so the traffic lights sit ON the cream canvas (OrbStack-style). Uses only
+    AppKit (bundled with pywebview's cocoa backend — no PyObjCTools, which
+    PyInstaller doesn't trace) and dispatches to the main thread via
+    NSOperationQueue. Logs the outcome so failures are never silent."""
     try:
         import AppKit
-        from PyObjCTools import AppHelper
         from webview.platforms.cocoa import BrowserView
 
         def apply() -> None:
-            inst = BrowserView.instances.get(window.uid)
-            nswindow = getattr(inst, "window", None) if inst else None
-            if nswindow is None:
-                return
-            mask = nswindow.styleMask() | (1 << 15)  # NSWindowStyleMaskFullSizeContentView
-            nswindow.setStyleMask_(mask)
-            nswindow.setTitlebarAppearsTransparent_(True)
-            nswindow.setTitleVisibility_(1)  # NSWindowTitleHidden
-            nswindow.setMovableByWindowBackground_(True)
-            cream = AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(
-                0.992, 0.965, 0.890, 1.0)
-            nswindow.setBackgroundColor_(cream)
+            try:
+                inst = BrowserView.instances.get(window.uid)
+                if inst is None and BrowserView.instances:
+                    inst = list(BrowserView.instances.values())[0]
+                nswindow = getattr(inst, "window", None) if inst else None
+                if nswindow is None:
+                    log("no NSWindow found — titlebar left as-is")
+                    return
+                nswindow.setStyleMask_(nswindow.styleMask() | (1 << 15))  # FullSizeContentView
+                nswindow.setTitlebarAppearsTransparent_(True)
+                nswindow.setTitleVisibility_(1)  # NSWindowTitleHidden
+                nswindow.setMovableByWindowBackground_(True)
+                nswindow.setBackgroundColor_(
+                    AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(0.992, 0.965, 0.890, 1.0))
+                log("unified titlebar applied ✓")
+            except Exception as exc:
+                log(f"titlebar styling failed: {type(exc).__name__}: {exc}")
 
-        AppHelper.callAfter(apply)
-    except Exception:
-        pass
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(apply)
+    except Exception as exc:
+        log(f"chrome unavailable: {type(exc).__name__}: {exc}")
 
 
 def desktop_main() -> int:

@@ -16,10 +16,8 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -51,24 +49,47 @@ def _sanitized_env() -> dict[str, str]:
     }
 
 
-def _login_shell_argv(cmd: list[str]) -> list[str]:
-    """Run through the user's login shell: a Finder-launched .app gets launchd's
-    bare PATH (no nvm/npm dirs), so `claude` and `node` resolve exactly as they
-    do in the user's own terminal."""
-    if sys.platform == "win32":
-        return cmd
-    shell = os.environ.get("SHELL") or ("/bin/zsh" if sys.platform == "darwin" else "/bin/bash")
-    return [shell, "-lc", shlex.join(cmd)]
+_CLAUDE_PATH: Optional[str] = None
+
+
+def resolve_claude() -> Optional[str]:
+    """Absolute path to the claude CLI, robust to GUI launches.
+
+    A Finder-launched .app gets launchd's bare PATH (no nvm/homebrew dirs) and a
+    NON-interactive login shell doesn't read .zshrc where nvm usually lives —
+    so we search the places Claude Code actually installs to, directly."""
+    global _CLAUDE_PATH
+    if _CLAUDE_PATH and Path(_CLAUDE_PATH).exists():
+        return _CLAUDE_PATH
+
+    home = Path.home()
+    candidates: list[Path] = []
+    w = shutil.which("claude")
+    if w:
+        candidates.append(Path(w))
+    candidates += [
+        home / ".claude" / "local" / "claude",   # native installer
+        Path("/opt/homebrew/bin/claude"),
+        Path("/usr/local/bin/claude"),
+        home / ".local" / "bin" / "claude",
+    ]
+    nvm = home / ".nvm" / "versions" / "node"
+    if nvm.is_dir():  # newest-used nvm node first
+        for v in sorted(nvm.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            candidates.append(v / "bin" / "claude")
+
+    for c in candidates:
+        try:
+            if c.exists():
+                _CLAUDE_PATH = str(c)
+                return _CLAUDE_PATH
+        except OSError:
+            continue
+    return None
 
 
 def claude_available() -> bool:
-    if shutil.which("claude") is not None:
-        return True
-    try:
-        probe = _login_shell_argv(["command", "-v", "claude"])
-        return subprocess.run(probe, capture_output=True, timeout=15).returncode == 0
-    except Exception:
-        return False
+    return resolve_claude() is not None
 
 
 def build_command(payload: dict[str, Any]) -> list[str]:
@@ -88,15 +109,20 @@ def build_command(payload: dict[str, Any]) -> list[str]:
 def run_claude(payload: dict[str, Any], workdir: Optional[str] = None) -> dict[str, Any]:
     """Execute headless Claude Code. Returns a worker-style result dict:
     {text, reported_cost_usd, num_turns, usage, returncode, is_error, [error]}."""
-    if not claude_available():
+    claude = resolve_claude()
+    if claude is None:
         return {"is_error": True, "returncode": 127,
                 "error": "claude CLI not found on this machine — install Claude Code and run /login"}
 
     cmd = build_command(payload)
+    cmd[0] = claude  # absolute path — immune to GUI-launch PATH problems
+    env = _sanitized_env()
+    # the claude script needs `node` next to it (nvm installs) on PATH
+    env["PATH"] = f"{Path(claude).parent}:{env.get('PATH', '/usr/bin:/bin')}"
     timeout = payload.get("timeout_seconds", 600)
     try:
-        proc = subprocess.run(_login_shell_argv(cmd), capture_output=True, text=True,
-                              timeout=timeout, cwd=workdir, env=_sanitized_env())
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=timeout, cwd=workdir, env=env)
     except subprocess.TimeoutExpired:
         return {"is_error": True, "returncode": -1,
                 "error": f"claude -p timed out after {timeout}s"}

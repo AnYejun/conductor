@@ -20,7 +20,6 @@ import argparse
 import json
 import os
 import platform
-import shlex
 import subprocess
 import sys
 import time
@@ -35,11 +34,23 @@ def _sanitized_env():
             if not (k.startswith("CLAUDE") or k in ("BAGGAGE", "AI_AGENT", "ANTHROPIC_BASE_URL"))}
 
 
-def _login_shell(cmd):
-    if sys.platform == "win32":
-        return cmd
-    shell = os.environ.get("SHELL") or ("/bin/zsh" if sys.platform == "darwin" else "/bin/bash")
-    return [shell, "-lc", shlex.join(cmd)]
+def _resolve_claude():
+    """Find the claude CLI even under a bare service PATH (systemd, launchd)."""
+    import shutil
+    home = os.path.expanduser("~")
+    cands = [shutil.which("claude"),
+             os.path.join(home, ".claude", "local", "claude"),
+             "/opt/homebrew/bin/claude", "/usr/local/bin/claude",
+             os.path.join(home, ".local", "bin", "claude")]
+    nvm = os.path.join(home, ".nvm", "versions", "node")
+    if os.path.isdir(nvm):
+        vs = sorted(os.listdir(nvm),
+                    key=lambda v: os.path.getmtime(os.path.join(nvm, v)), reverse=True)
+        cands += [os.path.join(nvm, v, "bin", "claude") for v in vs]
+    for c in cands:
+        if c and os.path.exists(c):
+            return c
+    return None
 
 
 def run_shell(payload, workdir=None):
@@ -50,7 +61,10 @@ def run_shell(payload, workdir=None):
 
 
 def run_claude(payload, workdir=None):
-    cmd = ["claude", "-p", payload["prompt"], "--output-format", "json"]
+    claude = _resolve_claude()
+    if not claude:
+        return {"is_error": True, "error": "claude CLI not found — install Claude Code and run /login"}
+    cmd = [claude, "-p", payload["prompt"], "--output-format", "json"]
     if payload.get("claude_model"):
         cmd += ["--model", payload["claude_model"]]
     if payload.get("claude_tools"):
@@ -58,12 +72,12 @@ def run_claude(payload, workdir=None):
     sys_parts = [p for p in (payload.get("system"), payload.get("briefing")) if p]
     if sys_parts:
         cmd += ["--append-system-prompt", "\n\n".join(sys_parts)]
+    env = _sanitized_env()
+    env["PATH"] = os.path.dirname(claude) + ":" + env.get("PATH", "/usr/bin:/bin")
     try:
-        proc = subprocess.run(_login_shell(cmd), capture_output=True, text=True,
+        proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=payload.get("timeout_seconds", 600),
-                              cwd=workdir, env=_sanitized_env())
-    except FileNotFoundError:
-        return {"is_error": True, "error": "claude CLI not found — install Claude Code and run /login"}
+                              cwd=workdir, env=env)
     except subprocess.TimeoutExpired:
         return {"is_error": True, "error": "claude -p timed out"}
     try:

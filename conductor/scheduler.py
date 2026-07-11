@@ -77,6 +77,30 @@ class Scheduler:
         except OSError:
             pass
 
+    def _apply_control(self) -> None:
+        """Pick up dashboard control requests (e.g. retry a failed task).
+        The UI writes .conductor/control.json; we consume and delete it."""
+        if self.plan_path is None:
+            return
+        ctl = self.plan_path.parent / ".conductor" / "control.json"
+        if not ctl.exists():
+            return
+        try:
+            data = json.loads(ctl.read_text())
+        except (json.JSONDecodeError, OSError):
+            data = {}
+        try:
+            ctl.unlink()
+        except OSError:
+            pass
+        for tid in data.get("retry", []):
+            if self.state.get(tid) in (State.failed, State.expired, State.skipped):
+                self.state[tid] = State.pending
+                self._defer_until.pop(tid, None)
+                self._detail.pop(tid, None)
+                self._log(tid, "scheduled", "retry requested from dashboard")
+        self._write_state()
+
     def _refresh_inbox(self) -> None:
         """Pick up tasks scheduled from the dashboard while we're running."""
         if self.plan_path is None:
@@ -188,16 +212,30 @@ class Scheduler:
 
     # -- entry points ----------------------------------------------------
 
-    async def run(self, once: bool = False) -> dict[str, State]:
+    async def run(self, once: bool = False, serve: bool = False) -> dict[str, State]:
         """Run until every task reaches a terminal state.
 
         once=True: run everything that can run *now* — including tasks whose
         dependencies complete during this pass — but don't wait for future
         windows or budget headroom. Budget-deferred tasks stay pending.
+
+        serve=True (the desktop app): never exit — keep watching for dashboard
+        retries and newly scheduled inbox tasks, and when the calendar day
+        changes, reset finished tasks so daily windows run again.
         """
         dispatched: set[str] = set()
+        day = dt.date.today()
         while True:
+            if serve and dt.date.today() != day:
+                day = dt.date.today()
+                for tid, s in list(self.state.items()):
+                    if s in TERMINAL:
+                        self.state[tid] = State.pending
+                self._defer_until.clear()
+                self._detail.clear()
+                self._log("plan", "scheduled", "new day — daily windows re-run")
             self._refresh_inbox()
+            self._apply_control()
             now = dt.datetime.now().time()
             eligible = self._eligible(now)
             self._write_state()  # _eligible can expire/skip tasks
@@ -217,7 +255,7 @@ class Scheduler:
                 # then stop — deferred tasks stay pending by design
                 self._eligible(dt.datetime.now().time())
                 break
-            if self._all_settled():
+            if self._all_settled() and not serve:
                 break
 
             # nothing running, nothing eligible: sleep until next tick
