@@ -1,0 +1,69 @@
+# CONDUCTOR plan — declare tasks with time windows, budgets, and priorities.
+# Copy to plan.yaml and edit.
+
+budget:
+  daily_usd: 5.00
+  hourly_usd: 1.00   # optional; rolling 60 minutes
+
+# Optional compute mesh — use your own machines as execution nodes.
+# Run `conductor hub` on one reachable machine (tailnet address recommended)
+# and `conductor worker --hub <url> [--allow-shell]` on each device.
+# mesh:
+#   hub: "http://100.64.0.3:4747"
+
+models:
+  # price is USD per 1M tokens. Current rates (2026-07) from
+  # https://platform.claude.com/docs/en/pricing — verify before relying on them.
+  opus:   { id: claude-opus-4-8,  price_in: 5.00, price_out: 25.00 }
+  # Sonnet 5 sticker is $3/$15; intro pricing $2/$10 runs through 2026-08-31.
+  sonnet: { id: claude-sonnet-5,  price_in: 3.00, price_out: 15.00 }
+  haiku:  { id: claude-haiku-4-5, price_in: 1.00, price_out: 5.00 }
+
+tasks:
+  - id: morning-digest
+    prompt_file: prompts/digest.md
+    window: { earliest: "07:00", deadline: "09:00" }
+    model: sonnet
+    max_output_tokens: 2000
+    priority: high
+    on_budget_exceeded: downgrade   # downgrade | defer | skip
+
+  - id: refactor-scan
+    prompt_file: prompts/scan.md
+    depends_on: [morning-digest]
+    window: { earliest: "09:00" }   # no deadline — runs any time after 09:00
+    model: opus
+    max_output_tokens: 4000
+    priority: med
+    on_budget_exceeded: defer
+
+  - id: quick-note
+    prompt: "One sentence: what is the single highest-leverage thing a solo founder should do before 10am?"
+    model: haiku
+    max_output_tokens: 200
+    priority: low
+    on_budget_exceeded: skip
+
+  # --- mesh examples (need `mesh.hub` above + a worker on that node) ---
+
+  # A shell command on another machine (worker must run with --allow-shell).
+  # - id: backup-home-server
+  #   kind: shell
+  #   command: "tar czf /backups/docs-$(date +%F).tgz ~/Documents"
+  #   runs_on: homebox            # node name = `conductor worker --node homebox`
+  #   window: { earliest: "03:00", deadline: "05:00" }
+
+  # Same, but isolated in a container on that machine (docker required).
+  # - id: nightly-scrape
+  #   kind: shell
+  #   command: "python -c 'print(\"runs inside alpine\")'"
+  #   container: python:3.12-alpine
+  #   runs_on: homebox
+  #   timeout_seconds: 900
+
+  # A Claude call executed FROM another machine (uses that node's API key);
+  # still budget-gated and reconciled into this plan's ledger.
+  # - id: remote-digest
+  #   prompt_file: prompts/digest.md
+  #   model: sonnet
+  #   runs_on: macstudio
