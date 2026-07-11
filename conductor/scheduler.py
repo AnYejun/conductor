@@ -45,6 +45,7 @@ class Scheduler:
         console: Optional[Console] = None,
         tick_seconds: int = 60,
         client: Optional[AsyncAnthropic] = None,
+        plan_path: Optional[Path] = None,  # enables live pickup of UI-scheduled tasks
     ):
         self.plan = plan
         self.ledger = ledger
@@ -52,6 +53,7 @@ class Scheduler:
         self.console = console or Console()
         self.tick_seconds = tick_seconds
         self.client = client or AsyncAnthropic()
+        self.plan_path = plan_path
         self.state: dict[str, State] = {t.id: State.pending for t in plan.tasks}
         self._running: set[asyncio.Task] = set()
         self._defer_until: dict[str, dt.datetime] = {}  # budget/quota-deferred backoff
@@ -72,6 +74,22 @@ class Scheduler:
             self.state_path.write_text(json.dumps(payload, indent=2))
         except OSError:
             pass
+
+    def _refresh_inbox(self) -> None:
+        """Pick up tasks scheduled from the dashboard while we're running."""
+        if self.plan_path is None:
+            return
+        from .schema import load_inbox_tasks
+        try:
+            fresh = load_inbox_tasks(self.plan, self.plan_path)
+        except Exception:
+            return  # malformed inbox entry — ignore until fixed
+        for t in fresh:
+            if t.id in self.state:
+                continue
+            self.plan.tasks.append(t)
+            self.state[t.id] = State.pending
+            self._log(t.id, "scheduled", f"from dashboard inbox ({t.kind.value})")
 
     # -- helpers -----------------------------------------------------------
 
@@ -175,6 +193,7 @@ class Scheduler:
         """
         dispatched: set[str] = set()
         while True:
+            self._refresh_inbox()
             now = dt.datetime.now().time()
             eligible = self._eligible(now)
             self._write_state()  # _eligible can expire/skip tasks

@@ -180,16 +180,53 @@ class Plan(BaseModel):
         return sorted(cheaper, key=lambda k: self.models[k].price_total, reverse=True)
 
 
-def load_plan(path: Path | str) -> Plan:
+def inbox_path(plan_path: Path) -> Path:
+    """UI-scheduled tasks live in a machine-owned overlay file, so the
+    dashboard never has to rewrite (and risk mangling) your plan.yaml."""
+    return plan_path.parent / ".conductor" / "inbox.yaml"
+
+
+def load_inbox_tasks(plan: Plan, plan_path: Path) -> list[Task]:
+    """Validated tasks from the inbox overlay. Plan-file ids win on collision."""
+    path = inbox_path(plan_path)
+    if not path.exists():
+        return []
+    data = yaml.safe_load(path.read_text()) or []
+    known = {t.id for t in plan.tasks}
+    out: list[Task] = []
+    for raw in data:
+        t = Task.model_validate(raw)
+        if t.id in known:
+            continue
+        if t.model is not None and t.model not in plan.models:
+            continue
+        _resolve_paths(t, plan_path)
+        known.add(t.id)
+        out.append(t)
+    # drop tasks whose dependencies don't resolve (would wedge the scheduler)
+    while True:
+        valid = {t.id for t in plan.tasks} | {t.id for t in out}
+        kept = [t for t in out if all(d in valid for d in t.depends_on)]
+        if len(kept) == len(out):
+            return kept
+        out = kept
+
+
+def _resolve_paths(t: Task, plan_path: Path) -> None:
+    if t.prompt_file and not t.prompt_file.is_absolute():
+        t.prompt_file = (plan_path.parent / t.prompt_file).resolve()
+    if t.prompt_file and not t.prompt_file.exists():
+        raise FileNotFoundError(f"task '{t.id}': prompt_file not found: {t.prompt_file}")
+    if t.workspace and not t.workspace.is_absolute():
+        t.workspace = (plan_path.parent / t.workspace).resolve()
+
+
+def load_plan(path: Path | str, include_inbox: bool = True) -> Plan:
     path = Path(path)
     data = yaml.safe_load(path.read_text())
     plan = Plan.model_validate(data)
-    # resolve prompt_file paths relative to the plan file
     for t in plan.tasks:
-        if t.prompt_file and not t.prompt_file.is_absolute():
-            t.prompt_file = (path.parent / t.prompt_file).resolve()
-        if t.prompt_file and not t.prompt_file.exists():
-            raise FileNotFoundError(f"task '{t.id}': prompt_file not found: {t.prompt_file}")
-        if t.workspace and not t.workspace.is_absolute():
-            t.workspace = (path.parent / t.workspace).resolve()
+        _resolve_paths(t, path)
+    if include_inbox:
+        plan.tasks.extend(load_inbox_tasks(plan, path))
     return plan

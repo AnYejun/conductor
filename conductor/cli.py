@@ -48,6 +48,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         outputs_dir=_state_dir(plan_path) / "outputs",
         console=console,
         tick_seconds=args.tick,
+        plan_path=plan_path,  # live pickup of dashboard-scheduled tasks
     )
     final = asyncio.run(sched.run(once=args.once))
 

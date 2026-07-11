@@ -220,11 +220,17 @@ ceilings never gate — observe first, then calibrate.
 conductor ui        # → http://127.0.0.1:4748
 ```
 
-A live, zero-dependency observability dashboard: USD budget burndown,
-subscription quota gauges with reset countdowns, task states, recent runs,
-and everything the agent has learned (long-term memory) — auto-refreshing,
-styled like the brand. This is where "my agents worked while I slept"
-becomes visible.
+A live, zero-dependency dashboard — not just observability, a control surface:
+
+- **USD budget burndown** + **subscription quota gauges** with reset countdowns
+- **Today's timeline** — every task's window as a 24h lane, with a now-line
+- **Schedule a task from the browser** — the form writes to
+  `.conductor/inbox.yaml` (your plan.yaml is never touched), and a running
+  scheduler picks new tasks up live, no restart. Inbox tasks can be removed
+  from the UI; plan-file tasks are read-only there.
+- Recent runs and everything the agent has learned (long-term memory)
+
+This is where "my agents worked while I slept" becomes visible.
 - **Memory**: the recall briefing is injected via `--append-system-prompt`,
   and if the task has a write-capable tool, it's instructed to save lessons
   into the same `.conductor/memory/` store the built-in agent uses.

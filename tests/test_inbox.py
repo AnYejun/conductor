@@ -1,0 +1,104 @@
+"""Dashboard inbox — schedule-from-UI overlay + scheduler hot pickup."""
+import json
+import threading
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+import httpx
+import pytest
+import yaml
+
+from conductor.schema import inbox_path, load_inbox_tasks, load_plan
+from conductor.ui import add_inbox_task, make_handler, remove_inbox_task
+
+PLAN = """
+budget: {daily_usd: 1.00}
+models:
+  haiku: {id: claude-haiku-4-5, price_in: 1.00, price_out: 5.00}
+tasks:
+  - id: base-task
+    kind: shell
+    command: "true"
+"""
+
+
+@pytest.fixture
+def plan_file(tmp_path: Path) -> Path:
+    p = tmp_path / "plan.yaml"
+    p.write_text(PLAN)
+    return p
+
+
+def test_inbox_merges_into_plan(plan_file: Path):
+    add_inbox_task(plan_file, {"id": "ui-task", "kind": "claude", "prompt": "hi"})
+    plan = load_plan(plan_file)
+    assert [t.id for t in plan.tasks] == ["base-task", "ui-task"]
+
+
+def test_inbox_rejects_duplicates_and_bad_refs(plan_file: Path):
+    with pytest.raises(ValueError, match="already exists"):
+        add_inbox_task(plan_file, {"id": "base-task", "kind": "claude", "prompt": "x"})
+    with pytest.raises(ValueError, match="unknown model"):
+        add_inbox_task(plan_file, {"id": "t2", "kind": "llm", "model": "gpt", "prompt": "x"})
+    with pytest.raises(ValueError, match="unknown dependency"):
+        add_inbox_task(plan_file, {"id": "t3", "kind": "claude", "prompt": "x",
+                                   "depends_on": ["ghost"]})
+
+
+def test_inbox_remove(plan_file: Path):
+    add_inbox_task(plan_file, {"id": "ui-task", "kind": "claude", "prompt": "hi"})
+    assert remove_inbox_task(plan_file, "ui-task")
+    assert not remove_inbox_task(plan_file, "ui-task")
+    assert load_inbox_tasks(load_plan(plan_file, include_inbox=False), plan_file) == []
+
+
+def test_malformed_dep_chain_dropped(plan_file: Path):
+    # hand-write an inbox entry with an unresolvable dep — loader must drop it
+    ip = inbox_path(plan_file)
+    ip.parent.mkdir(parents=True, exist_ok=True)
+    ip.write_text(yaml.safe_dump([
+        {"id": "ok", "kind": "claude", "prompt": "x"},
+        {"id": "orphan", "kind": "claude", "prompt": "x", "depends_on": ["nope"]},
+    ]))
+    plan = load_plan(plan_file)
+    assert [t.id for t in plan.tasks] == ["base-task", "ok"]
+
+
+def test_scheduler_hot_pickup(plan_file: Path, tmp_path: Path):
+    import asyncio
+
+    from conductor.ledger import Ledger
+    from conductor.scheduler import Scheduler, State
+
+    plan = load_plan(plan_file)
+    sched = Scheduler(plan, Ledger(tmp_path / "l.json"),
+                      outputs_dir=plan_file.parent / ".conductor" / "outputs",
+                      tick_seconds=1, plan_path=plan_file)
+    # schedule from the "dashboard" AFTER the scheduler was constructed
+    add_inbox_task(plan_file, {"id": "late-arrival", "kind": "shell", "command": "echo hot"})
+    final = asyncio.run(sched.run(once=True))
+    assert final["late-arrival"] is State.done
+
+
+def test_http_schedule_roundtrip(plan_file: Path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(plan_file))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        r = httpx.post(f"{url}/api/tasks", json={
+            "id": "from-ui", "kind": "claude", "prompt": "do the thing",
+            "window": {"earliest": "02:00"}, "on_budget_exceeded": "downgrade",
+        })
+        assert r.status_code == 201
+        state = httpx.get(f"{url}/api/state").json()
+        row = next(t for t in state["tasks"] if t["id"] == "from-ui")
+        assert row["source"] == "inbox" and row["earliest"] == "02:00"
+
+        bad = httpx.post(f"{url}/api/tasks", json={"id": "from-ui", "kind": "claude",
+                                                   "prompt": "dup"})
+        assert bad.status_code == 400 and "already exists" in bad.json()["error"]
+
+        assert httpx.delete(f"{url}/api/tasks/from-ui").status_code == 200
+        assert httpx.delete(f"{url}/api/tasks/base-task").status_code == 409
+    finally:
+        server.shutdown()
