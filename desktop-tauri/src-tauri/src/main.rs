@@ -66,8 +66,8 @@ fn main() {
             // 2. splash window with native unified chrome
             let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("Conductor")
-                .inner_size(1180.0, 880.0)
-                .min_inner_size(820.0, 600.0)
+                .inner_size(1000.0, 700.0)
+                .min_inner_size(760.0, 540.0)
                 .title_bar_style(TitleBarStyle::Overlay)
                 .hidden_title(true)
                 .build()?;

@@ -119,16 +119,16 @@ async def gate_and_run(
         cache_read=getattr(u, "cache_read_input_tokens", 0) or 0,
         cache_creation=getattr(u, "cache_creation_input_tokens", 0) or 0,
     )
+    # 4. save the deliverable, then reconcile (the ledger entry links the output)
+    text = "\n\n".join(b.text for b in resp.content if b.type == "text")
+    out_path = _write_output(outputs_dir, task, model.id, resp.stop_reason, actual, text)
     ledger.add(task.id, model.id, actual, {
         "input_tokens": u.input_tokens,
         "output_tokens": u.output_tokens,
         "cache_read_input_tokens": getattr(u, "cache_read_input_tokens", 0) or 0,
         "cache_creation_input_tokens": getattr(u, "cache_creation_input_tokens", 0) or 0,
+        "output": out_path.name,
     })
-
-    # 4. save the deliverable
-    text = "\n\n".join(b.text for b in resp.content if b.type == "text")
-    out_path = _write_output(outputs_dir, task, model.id, resp.stop_reason, actual, text)
 
     detail = ""
     if resp.stop_reason == "max_tokens":
@@ -229,17 +229,16 @@ async def _run_claude(plan: Plan, task: Task, ledger: Ledger, outputs_dir: Path)
 
     effective_model = model_override or task.claude_model or "default"
     reported = res.get("reported_cost_usd", 0.0)
+    out_path = write_remote_output(outputs_dir, task, item, 0.0, effective_model)
     if res.get("usage"):
         # $0 against the budget (subscription); tokens + reported cost kept for
         # observability — and, for remote runs, for the quota monitor ("node" marks
         # entries that local transcripts don't already cover)
         usage = {**res["usage"], "reported_cost_usd": reported,
-                 "num_turns": res.get("num_turns", 0)}
+                 "num_turns": res.get("num_turns", 0), "output": out_path.name}
         if task.runs_on:
             usage["node"] = task.runs_on
         ledger.add(task.id, f"claude-code/{effective_model}", 0.0, usage)
-
-    out_path = write_remote_output(outputs_dir, task, item, 0.0, effective_model)
     where = f"on {task.runs_on}" if task.runs_on else "local"
     if item["status"] != "done" or res.get("is_error"):
         return RunResult(Outcome.failed, output_path=out_path,
@@ -318,8 +317,8 @@ async def _run_remote_llm(
         cache_read=u.get("cache_read_input_tokens", 0),
         cache_creation=u.get("cache_creation_input_tokens", 0),
     )
-    ledger.add(task.id, model.id, actual, u)
     out_path = write_remote_output(outputs_dir, task, item, actual, model.id)
+    ledger.add(task.id, model.id, actual, {**u, "output": out_path.name})
 
     detail = f"on {task.runs_on}"
     if res.get("stop_reason") == "max_tokens":

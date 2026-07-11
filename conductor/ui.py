@@ -80,6 +80,11 @@ def collect_state(plan: Plan, plan_path: Path) -> dict[str, Any]:
         }
     quota = {"five_hour": win(snap.five_hour), "weekly": win(snap.weekly),
              "reserve": plan.subscription.reserve}
+    try:
+        from .quota_live import fetch_live
+        quota["live"] = fetch_live()  # real plan utilization, same source as /usage
+    except Exception:
+        quota["live"] = None
 
     # tasks + scheduler state
     run_state: dict[str, Any] = {}
@@ -123,8 +128,12 @@ def collect_state(plan: Plan, plan_path: Path) -> dict[str, Any]:
         "cost_usd": e["cost_usd"],
         "in": e["usage"].get("input_tokens", 0),
         "out": e["usage"].get("output_tokens", 0),
+        "cache": e["usage"].get("cache_read_input_tokens", 0),
+        "turns": e["usage"].get("num_turns"),
+        "node": e["usage"].get("node"),
+        "output": e["usage"].get("output"),
         "reported": e["usage"].get("reported_cost_usd"),
-    } for e in ledger.entries[-25:]][::-1]
+    } for e in ledger.entries[-40:]][::-1]
 
     memories = [{
         "summary": m.summary, "tags": m.tags, "source": m.source, "created": m.created,
@@ -171,6 +180,51 @@ def request_retry(plan_path: Path, ids: Optional[list[str]] = None) -> list[str]
     ctl.parent.mkdir(parents=True, exist_ok=True)
     ctl.write_text(json.dumps({"retry": merged}))
     return merged
+
+
+PLANNER_SYSTEM = """You are the planning assistant inside conductor, a scheduler that runs \
+Claude tasks on a budget. Help the user design scheduled tasks by conversing naturally \
+(reply in the user's language). Ask at most one clarifying question at a time.
+
+When the user has settled on one or more tasks, include a fenced ```json block:
+{"tasks": [{"id": "kebab-case-id", "kind": "claude", "claude_model": "sonnet",
+ "prompt": "...", "window": {"earliest": "HH:MM", "deadline": "HH:MM"},
+ "on_budget_exceeded": "defer", "runs_on": null}]}
+Rules: kind is "claude" (subscription, preferred), "llm" (needs model key from the plan), \
+or "shell" (command field instead of prompt). claude_model ∈ opus|sonnet|haiku. window is \
+optional (omit = run anytime); both bounds are optional. runs_on must be one of the \
+connected machines or omitted. Keep prompts self-contained — the task runs unattended. \
+Emit the json only when the user confirms they want it scheduled."""
+
+
+def plan_chat(plan_path: Path, history: list[dict[str, str]]) -> str:
+    """One conversational turn with the user's own subscription Claude, primed
+    with the current plan + machines so it designs schedulable tasks."""
+    from .claude_exec import run_claude
+
+    plan = load_plan(plan_path)
+    ctx_tasks = [f"- {t.id} ({t.kind.value}, {t.window.earliest or 'anytime'})"
+                 for t in plan.tasks]
+    nodes = [n["name"] for n in _hub_nodes(plan.mesh.hub) if n.get("online")]
+    context = (f"Current plan tasks:\n" + ("\n".join(ctx_tasks) or "(none)")
+               + f"\nConnected machines: {', '.join(nodes) or '(none — local only)'}"
+               + f"\nModel keys in plan: {', '.join(plan.models)}")
+
+    convo = "\n\n".join(
+        ("User: " if m.get("role") == "user" else "Assistant: ") + m.get("content", "")
+        for m in history[-16:]
+    )
+    payload = {
+        "task_id": "plan-chat",
+        "prompt": f"{context}\n\n{convo}\n\nAssistant:",
+        "system": PLANNER_SYSTEM,
+        "claude_model": "sonnet",
+        "timeout_seconds": 120,
+    }
+    res = run_claude(payload)
+    if res.get("is_error"):
+        raise RuntimeError(res.get("error") or "claude call failed")
+    return res.get("text", "")
 
 
 def open_terminal_login() -> None:
@@ -308,6 +362,7 @@ code{font:12.5px ui-monospace,Menlo,monospace;background:#fff;border:1.5px solid
     <a data-v="timeline">timeline</a>
     <a data-v="runs">runs <span class="n" id="n-runs">0</span></a>
     <div class="navgroup">control</div>
+    <a data-v="compose">compose ✦</a>
     <a data-v="schedule">schedule</a>
     <a data-v="tasks">tasks <span class="n" id="n-tasks">0</span></a>
     <div class="navgroup">system</div>
@@ -329,6 +384,16 @@ code{font:12.5px ui-monospace,Menlo,monospace;background:#fff;border:1.5px solid
   <section class="view" id="v-timeline">
     <div class="vtitle">timeline</div><div class="vsub">every task's window over 24h — the red line is now</div>
     <div class="card"><div id="timeline"></div></div>
+  </section>
+  <section class="view" id="v-compose">
+    <div class="vtitle">compose</div><div class="vsub">plan the schedule by talking to your own Claude — it knows your tasks and machines</div>
+    <div class="card" style="display:flex;flex-direction:column;height:calc(100vh - 230px);min-height:360px">
+      <div id="chat" style="flex:1;overflow-y:auto;padding-right:6px"></div>
+      <form onsubmit="return composeSend(event)" style="display:flex;gap:10px;margin-top:12px">
+        <input id="composeInput" autocomplete="off" placeholder="e.g. summarize my repo's TODOs every morning at 7" style="flex:1;font:inherit;font-size:14px;padding:10px 12px;border:2.5px solid var(--ink);border-radius:11px;background:#fff">
+        <button class="bbtn" style="background:var(--gold)">send</button>
+      </form>
+    </div>
   </section>
   <section class="view" id="v-schedule">
     <div class="vtitle">schedule</div><div class="vsub">lands in .conductor/inbox.yaml — a running scheduler picks it up live</div>
@@ -385,6 +450,12 @@ function gauge(label,used,cap,unit,reset){
   return `<div class="gauge"><div class="lbl"><span>${label}</span><span>${fmt(used)} / ${fmt(cap)} ${unit}${r}</span></div><div class="bar"><i style="width:${p}%;background:${col}"></i></div></div>`;
 }
 function chip(s){return `<span class="chip s-${esc(s)}">${esc(s)}</span>`}
+function gaugePct(label,pct,reset){
+  const p=Math.min(100,Math.max(0,pct));
+  const col=p<60?"var(--teal)":p<85?"var(--gold)":"var(--red)";
+  const r=reset?` · resets ${new Date(reset).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}`:"";
+  return `<div class="gauge"><div class="lbl"><span>${label}</span><span>${p.toFixed(0)}% used${r}</span></div><div class="bar"><i style="width:${p}%;background:${col}"></i></div></div>`;
+}
 const mins=t=>{if(!t)return null;const[h,m]=t.split(":").map(Number);return h*60+m};
 const SCOL={done:"var(--teal)",running:"var(--cobalt)",failed:"var(--red)",expired:"var(--red)",skipped:"#ccc"};
 function timeline(tasks){
@@ -441,6 +512,60 @@ async function claudeLogin(btn){
   if(!r.ok){const d=await r.json();alert(d.error||"could not open Terminal");}
 }
 kindswap("claude");
+
+let chatHistory=[],composeTasks=[];
+const INTRO="What should go on the schedule? Tell me in plain words — e.g. “triage my repo's TODOs every morning at 7” or “back up the home server at 3am”. I know your existing tasks and connected machines.";
+function bubble(role,html){return `<div style="margin:8px 0;display:flex;${role==="user"?"justify-content:flex-end":""}"><div style="max-width:80%;padding:9px 13px;border:2.5px solid var(--ink);border-radius:13px;background:${role==="user"?"var(--gold)":"#fff"};font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere">${html}</div></div>`}
+function taskCard(t){
+  composeTasks.push(t);const i=composeTasks.length-1;
+  return `<div style="border:2.5px solid var(--ink);border-radius:11px;background:var(--paper);padding:10px 12px;margin:8px 0">
+   <b>${esc(t.id||"task")}</b> <span class="chip k-claude">${esc(t.kind||"claude")}${t.claude_model?" · "+esc(t.claude_model):""}</span><br>
+   <span class="muted">${esc((t.prompt||t.command||"").slice(0,220))}</span><br>
+   <span class="muted">${t.window?esc((t.window.earliest||"·")+"–"+(t.window.deadline||"·")):"anytime"} · ${esc(t.runs_on||"local")} · ${esc(t.on_budget_exceeded||"defer")}</span><br>
+   <button class="bbtn" style="margin-top:7px" onclick="scheduleFromCard(this,${i})">schedule it →</button></div>`;
+}
+function renderAssistant(text){
+  return esc(text).replace(/```json([\\s\\S]*?)```/g,(m,body)=>{
+    try{const d=JSON.parse(body.replace(/&quot;/g,'"').replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">"));
+        if(d.tasks&&d.tasks.length)return d.tasks.map(taskCard).join("");}catch(e){}
+    return `<pre style="white-space:pre-wrap">${body}</pre>`;});
+}
+function renderChat(extra){
+  const el=document.getElementById("chat");
+  const msgs=chatHistory.length?chatHistory.map(m=>bubble(m.role,m.role==="assistant"?renderAssistant(m.content):esc(m.content))).join(""):bubble("assistant",esc(INTRO));
+  el.innerHTML=msgs+(extra||"");el.scrollTop=el.scrollHeight;
+}
+async function composeSend(ev){
+  ev.preventDefault();
+  const inp=document.getElementById("composeInput"),msg=inp.value.trim();
+  if(!msg)return false;
+  inp.value="";chatHistory.push({role:"user",content:msg});
+  renderChat(bubble("assistant",'<i class="muted">the metronome is thinking…</i>'));
+  try{
+    const r=await fetch("/api/plan-chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({history:chatHistory})});
+    const d=await r.json();
+    chatHistory.push({role:"assistant",content:r.ok?d.text:("⚠ "+(d.error||"error"))});
+  }catch(e){chatHistory.push({role:"assistant",content:"⚠ engine unreachable"});}
+  renderChat();return false;
+}
+async function scheduleFromCard(btn,i){
+  const r=await fetch("/api/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(composeTasks[i])});
+  const d=await r.json();
+  btn.textContent=r.ok?"scheduled ✓":(d.error||"failed");
+  if(r.ok){btn.disabled=true;tick();}
+}
+renderChat();
+
+let expandedRun=null;
+async function toggleRun(i,out){
+  if(!out)return;
+  const row=document.getElementById("rundetail-"+i);if(!row)return;
+  const show=row.style.display==="none";
+  row.style.display=show?"":"none";expandedRun=show?i:null;
+  if(show){const pre=document.getElementById("runpre-"+i);
+    if(pre.dataset.loaded!=="1"){const r=await fetch("/api/output/"+out);
+      pre.textContent=r.ok?await r.text():"output unavailable";pre.dataset.loaded="1";}}
+}
 async function tick(){
   let d;try{d=await (await fetch("/api/state")).json()}catch(e){return}
   document.getElementById("planname").textContent=d.plan;
@@ -478,11 +603,22 @@ async function tick(){
   const b=d.budget;
   document.getElementById("budget").innerHTML=
     gauge("today",b.spent_today,b.daily_usd,"$")+(b.hourly_usd?gauge("rolling hour",b.spent_hour,b.hourly_usd,"$"):"");
-  const q=d.quota;
-  document.getElementById("quota").innerHTML=
-    gauge("5-hour window",q.five_hour.burn,q.five_hour.ceiling,"tok",q.five_hour.resets_at)+
-    gauge("weekly window",q.weekly.burn,q.weekly.ceiling,"tok",q.weekly.resets_at)+
-    `<div class="muted">reserve ${(q.reserve*100).toFixed(0)}% kept for interactive use</div>`;
+  const q=d.quota,lv=q.live;
+  if(lv&&lv.windows&&(lv.windows.five_hour||lv.windows.weekly)){
+    const w5=lv.windows.five_hour,w7=lv.windows.weekly,wo=lv.windows.weekly_opus;
+    document.getElementById("quota").innerHTML=
+      (w5&&w5.pct!=null?gaugePct("5-hour window",w5.pct,w5.resets_at):"")+
+      (w7&&w7.pct!=null?gaugePct("weekly window",w7.pct,w7.resets_at):"")+
+      (wo&&wo.pct!=null?gaugePct("weekly · opus",wo.pct,wo.resets_at):"")+
+      `<div class="muted"><span class="tag" style="background:var(--teal)">live</span> from your Claude account`+
+      (lv.plan?` · plan <b>${esc(String(lv.plan).replace("claude_","claude "))}</b>`:"")+
+      ` · local est ${fmt(q.five_hour.burn)} tok / 5h</div>`;
+  }else{
+    document.getElementById("quota").innerHTML=
+      gauge("5-hour window",q.five_hour.burn,q.five_hour.ceiling,"tok",q.five_hour.resets_at)+
+      gauge("weekly window",q.weekly.burn,q.weekly.ceiling,"tok",q.weekly.resets_at)+
+      `<div class="muted">local estimate — live account data unavailable · reserve ${(q.reserve*100).toFixed(0)}%</div>`;
+  }
   document.getElementById("timeline").innerHTML=d.tasks.length?timeline(d.tasks):'<div class="empty">no tasks yet — schedule one</div>';
   document.getElementById("tasks").innerHTML=d.tasks.length?`<table><tr><th>task</th><th>kind</th><th>where</th><th>window</th><th>deps</th><th>state</th><th></th></tr>`+
     d.tasks.map(t=>`<tr><td><b>${esc(t.id)}</b>${t.agentic?' <span class="tag">agentic</span>':''}${t.source==="inbox"?' <span class="tag" style="background:var(--gold)">inbox</span>':''}</td>
@@ -491,11 +627,20 @@ async function tick(){
     <td>${t.depends_on.map(esc).join(", ")||"—"}</td>
     <td>${chip(t.state)}${t.detail&&(t.state==="failed"||t.state==="skipped")?`<br><span class="muted" style="font-size:11.5px">${esc(t.detail.slice(0,90))}</span>`:""}</td>
     <td style="white-space:nowrap">${["failed","expired","skipped"].includes(t.state)?`<button class="del" onclick="retryTask('${esc(t.id)}')" title="retry">↻</button>`:""}${t.source==="inbox"?`<button class="del" onclick="unschedule('${esc(t.id)}')" title="remove from inbox">✕</button>`:""}</td></tr>`).join("")+"</table>":'<div class="empty">no tasks in plan</div>';
-  document.getElementById("ledger").innerHTML=d.ledger.length?`<table><tr><th>when</th><th>task</th><th>tok in/out</th><th>cost</th></tr>`+
-    d.ledger.map(e=>`<tr><td class="muted">${new Date(e.ts).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</td>
-    <td><b>${esc(e.task_id)}</b><br><span class="muted">${esc(e.model)}</span></td>
-    <td>${fmt(e.in)} / ${fmt(e.out)}</td>
-    <td>${e.cost_usd?"$"+e.cost_usd.toFixed(4):(e.reported!=null?`<span class="tag">sub $${e.reported.toFixed(3)}</span>`:"$0")}</td></tr>`).join("")+"</table>":'<div class="empty">nothing has run yet</div>';
+  if(expandedRun===null){
+  document.getElementById("ledger").innerHTML=d.ledger.length?`<table><tr><th>when</th><th>task</th><th>tokens in/out</th><th>cost</th></tr>`+
+    d.ledger.map((e,i)=>{
+      const t=new Date(e.ts);
+      const when=t.toLocaleDateString([],{month:"2-digit",day:"2-digit"})+" "+t.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+      return `<tr style="cursor:${e.output?"pointer":"default"}" ${e.output?`onclick="toggleRun(${i},'${encodeURIComponent(e.output)}')" title="click for the output"`:""}>
+      <td class="muted">${when}</td>
+      <td><b>${esc(e.task_id)}</b>${e.node?` <span class="tag">@ ${esc(e.node)}</span>`:""}${e.output?' <span class="muted">▸</span>':''}<br>
+        <span class="muted">${esc(e.model)}${e.turns?` · ${e.turns} turn${e.turns>1?"s":""}`:""}</span></td>
+      <td>${fmt(e.in)} / ${fmt(e.out)}${e.cache?`<br><span class="muted">cache ${fmt(e.cache)}</span>`:""}</td>
+      <td>${e.cost_usd?"$"+e.cost_usd.toFixed(4):(e.reported!=null?`<span class="tag">sub $${e.reported.toFixed(3)}</span>`:"$0")}</td></tr>
+      <tr id="rundetail-${i}" style="display:none"><td colspan="4"><pre id="runpre-${i}" data-loaded="0" style="white-space:pre-wrap;font-size:12px;background:#fff;border:2px solid var(--ink);border-radius:9px;padding:10px;max-height:320px;overflow:auto;margin:4px 0">…</pre></td></tr>`;
+    }).join("")+"</table>":'<div class="empty">nothing has run yet</div>';
+  }
   document.getElementById("memory").innerHTML=d.memories.length?d.memories.map(m=>
     `<div style="padding:7px 0;border-bottom:1px solid #e4dcc6">
      <svg class="eye" width="15" height="11" viewBox="0 0 40 26"><path d="M2 13 Q20 -3 38 13 Q20 29 2 13 Z" fill="#fff" stroke="#111" stroke-width="3"/><circle cx="20" cy="13" r="6" fill="#27DBA2" stroke="#111" stroke-width="2"/><circle cx="20" cy="13" r="2.6" fill="#111"/></svg>
@@ -534,6 +679,14 @@ def make_handler(plan_path: Path):
                     return self._json(200, data)
                 except Exception as exc:
                     return self._json(500, {"error": str(exc)})
+            if path.startswith("/api/output/"):
+                import urllib.parse
+                name = Path(urllib.parse.unquote(path.rsplit("/", 1)[1])).name  # basename only
+                f = plan_path.parent / ".conductor" / "outputs" / name
+                if f.exists() and f.suffix == ".md":
+                    return self._send(200, f.read_bytes()[:200_000],
+                                      "text/plain; charset=utf-8")
+                return self._json(404, {"error": "output not found"})
             return self._json(404, {})
 
         def do_POST(self) -> None:
@@ -558,6 +711,14 @@ def make_handler(plan_path: Path):
                 try:
                     open_terminal_login()
                     return self._json(200, {"ok": True})
+                except Exception as exc:
+                    return self._json(400, {"error": str(exc)})
+            if path == "/api/plan-chat":
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(n) or b"{}")
+                    text = plan_chat(plan_path, body.get("history") or [])
+                    return self._json(200, {"text": text})
                 except Exception as exc:
                     return self._json(400, {"error": str(exc)})
             return self._json(404, {})
