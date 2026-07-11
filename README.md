@@ -231,6 +231,14 @@ A live, zero-dependency dashboard — not just observability, a control surface:
 - Recent runs and everything the agent has learned (long-term memory)
 
 This is where "my agents worked while I slept" becomes visible.
+
+Prefer a desktop app? Same dashboard, native window (WKWebView/WebView2 —
+no Electron):
+
+```bash
+pip install "conductor-agent[app]"
+conductor app
+```
 - **Memory**: the recall briefing is injected via `--append-system-prompt`,
   and if the task has a write-capable tool, it's instructed to save lessons
   into the same `.conductor/memory/` store the built-in agent uses.

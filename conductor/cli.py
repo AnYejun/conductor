@@ -230,6 +230,14 @@ def cmd_ui(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_app(args: argparse.Namespace) -> int:
+    from .app import run_app
+
+    plan_path = Path(args.plan).resolve()
+    console.print("[bold]conductor app[/bold] — opening the dashboard in a native window…")
+    return run_app(plan_path, port=args.port)
+
+
 def cmd_hub(args: argparse.Namespace) -> int:
     import os
     from .hub import serve
@@ -345,6 +353,11 @@ def main(argv: list[str] | None = None) -> int:
     p_ui.add_argument("--host", default="127.0.0.1")
     p_ui.add_argument("--port", type=int, default=4748)
     p_ui.set_defaults(fn=cmd_ui)
+
+    p_app = sub.add_parser("app", help="the dashboard as a native desktop window (pywebview)")
+    p_app.add_argument("plan", nargs="?", default="plan.yaml")
+    p_app.add_argument("--port", type=int, default=0, help="UI port (default: auto)")
+    p_app.set_defaults(fn=cmd_app)
 
     args = parser.parse_args(argv)
     try:

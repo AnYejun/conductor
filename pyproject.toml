@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "conductor-agent"
-version = "0.6.0"
+version = "0.7.0"
 description = "Token-budget-aware task scheduler for the Claude API — declare tasks with time windows, cost budgets, and priorities; the runner executes them within budget."
 readme = "README.md"
 license = { text = "MIT" }
@@ -24,6 +24,9 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Software Development :: Libraries",
 ]
+
+[project.optional-dependencies]
+app = ["pywebview>=5"]
 
 [project.scripts]
 conductor = "conductor.cli:main"
