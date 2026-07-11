@@ -125,9 +125,19 @@ conductor hub --host 100.64.0.3 --port 4747
 export CONDUCTOR_TOKEN=<same token>
 conductor worker --hub http://100.64.0.3:4747 --node homebox --allow-shell
 
-# 3. check who's connected
+# 3. check who's connected (or open the "machines" tab in the app)
 conductor nodes --hub http://100.64.0.3:4747
 ```
+
+> **"Use my home computer from outside, with one Claude ID."** That's exactly
+> what the mesh is — and it needs **no credential copying**. Run
+> `claude /login` **once on each machine**; the mesh moves the *work* to the
+> machine, not the login. From your laptop anywhere, schedule a `kind: claude`
+> task with `runs_on: homebox` and it runs on the home machine under *its own*
+> Claude session. The **machines** tab in the app shows which of your computers
+> are online and gives you the exact join command. (There's no way to
+> "auto-login" a fresh container — Claude auth is per-machine OAuth by design —
+> and you don't need one: log in once per machine, dispatch forever.)
 
 **Three kinds of remote work:**
 

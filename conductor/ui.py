@@ -126,7 +126,38 @@ def collect_state(plan: Plan, plan_path: Path) -> dict[str, Any]:
         "budget": budget, "quota": quota, "tasks": tasks,
         "ledger": recents, "memories": memories,
         "hub": plan.mesh.hub,
+        "nodes": _hub_nodes(plan.mesh.hub),
     }
+
+
+def _hub_nodes(hub: Optional[str]) -> list[dict[str, Any]]:
+    """Query the mesh hub for connected machines. Best-effort + short timeout so
+    a slow/absent hub never stalls the dashboard."""
+    if not hub:
+        return []
+    import os
+    import urllib.request
+
+    req = urllib.request.Request(f"{hub.rstrip('/')}/v0/health")
+    token = os.environ.get("CONDUCTOR_TOKEN")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=2) as r:
+            health = json.loads(r.read())
+    except Exception:
+        return []
+    now = dt.datetime.now().astimezone()
+    out = []
+    for name, info in sorted((health.get("nodes") or {}).items()):
+        try:
+            seen = dt.datetime.fromisoformat(info["last_seen"])
+            age = (now - seen).total_seconds()
+        except Exception:
+            age = None
+        out.append({"name": name, "age_seconds": age,
+                    "online": age is not None and age < 90})
+    return out
 
 
 PAGE = """<!DOCTYPE html>
@@ -196,6 +227,8 @@ form.sched button:hover{background:var(--teal)}
 #formmsg{grid-column:1/-1;font-size:13px;font-family:Georgia,serif;font-style:italic}
 .del{cursor:pointer;border:none;background:none;font-size:14px;color:#999;padding:0 4px}
 .del:hover{color:var(--red)}
+code{font:12.5px ui-monospace,Menlo,monospace;background:#fff;border:1.5px solid var(--ink);border-radius:5px;padding:1px 6px}
+#meshhelp b{font-size:14px}#meshhelp{line-height:2.1}
 </style></head><body>
 <div class="shell">
 <aside>
@@ -210,6 +243,7 @@ form.sched button:hover{background:var(--teal)}
     <a data-v="tasks">tasks <span class="n" id="n-tasks">0</span></a>
     <a data-v="runs">runs <span class="n" id="n-runs">0</span></a>
     <a data-v="memory">memory <span class="n" id="n-mem">0</span></a>
+    <a data-v="nodes">machines <span class="n" id="n-nodes">0</span></a>
   </nav>
   <div class="side-foot">ceci n'est pas<br>un cron.<br><br><span id="ts">…</span></div>
 </aside>
@@ -236,7 +270,7 @@ form.sched button:hover{background:var(--teal)}
     <div><label>earliest</label><input name="earliest" type="time"></div>
     <div><label>deadline</label><input name="deadline" type="time"></div>
     <div><label>if over budget</label><select name="policy"><option>defer</option><option>downgrade</option><option>skip</option></select></div>
-    <div><label>runs on</label><input name="runs_on" placeholder="local"></div>
+    <div><label>runs on</label><input name="runs_on" placeholder="local" list="nodelist"><datalist id="nodelist"></datalist></div>
     <textarea name="prompt" id="f-prompt" placeholder="What should the agent do?" required></textarea>
     <button>schedule it</button><div id="formmsg"></div>
     </form></div>
@@ -252,6 +286,13 @@ form.sched button:hover{background:var(--teal)}
   <section class="view" id="v-memory">
     <div class="vtitle">memory</div><div class="vsub">what the agents learned — inspect, edit, or delete the files anytime</div>
     <div class="card"><div id="memory"></div></div>
+  </section>
+  <section class="view" id="v-nodes">
+    <div class="vtitle">machines</div><div class="vsub">your own computers, joined as a mesh — schedule work onto any of them with one Claude login each</div>
+    <div class="card"><div id="nodes"></div></div>
+    <div class="card"><h2>how to add a machine</h2>
+      <div id="meshhelp" class="muted"></div>
+    </div>
   </section>
 </main>
 </div>
@@ -323,6 +364,21 @@ async function tick(){
   document.getElementById("n-tasks").textContent=d.tasks.length;
   document.getElementById("n-runs").textContent=d.ledger.length;
   document.getElementById("n-mem").textContent=d.memories.length;
+  const nodes=d.nodes||[];
+  document.getElementById("n-nodes").textContent=nodes.length;
+  document.getElementById("nodelist").innerHTML=nodes.map(n=>`<option value="${esc(n.name)}">`).join("");
+  const dot=on=>`<span style="display:inline-block;width:9px;height:9px;border-radius:99px;border:2px solid var(--ink);background:${on?"var(--teal)":"#ccc"};margin-right:7px"></span>`;
+  document.getElementById("nodes").innerHTML=!d.hub?
+    '<div class="empty">no mesh hub configured — add <code>mesh: { hub: "http://…:4747" }</code> to your plan, then run <code>conductor hub</code></div>':
+    (nodes.length?`<table><tr><th>machine</th><th>status</th><th>last seen</th></tr>`+
+      nodes.map(n=>`<tr><td>${dot(n.online)}<b>${esc(n.name)}</b></td>
+      <td>${n.online?'<span class="chip s-done">online</span>':'<span class="chip">idle</span>'}</td>
+      <td class="muted">${n.age_seconds==null?"—":n.age_seconds<90?Math.round(n.age_seconds)+"s ago":Math.round(n.age_seconds/60)+"m ago"}</td></tr>`).join("")+"</table>"
+      :'<div class="empty">hub is up, but no workers have joined yet — run <code>conductor worker --hub '+esc(d.hub)+' --node &lt;name&gt; --allow-shell</code> on each machine</div>');
+  document.getElementById("meshhelp").innerHTML=
+    `<b>1.</b> On this machine (the hub): <code>conductor hub --host &lt;tailnet-ip&gt;</code><br>`+
+    `<b>2.</b> On each computer you want to use: <code>claude /login</code> once, then <code>conductor worker --hub ${d.hub?esc(d.hub):"http://&lt;ip&gt;:4747"} --node home --allow-shell</code><br>`+
+    `<b>3.</b> Schedule any task with <b>runs on = home</b> — it executes there, on that machine's own Claude login. Your credentials never leave it.`;
   const cnt={};d.tasks.forEach(t=>cnt[t.state]=(cnt[t.state]||0)+1);
   document.getElementById("counts").innerHTML=["done","running","pending","failed"].map(s=>
     `<div class="stat"><b>${cnt[s]||0}</b><span>${s}</span></div>`).join("")+
