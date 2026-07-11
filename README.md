@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
-    <img src="assets/logo-light.svg" alt="CONDUCTOR" width="120">
-  </picture>
+  <img src="assets/logo.svg" alt="conductor — the metronome that watches your spend" width="140">
 </p>
 
 <h1 align="center">conductor</h1>
