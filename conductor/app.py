@@ -128,31 +128,44 @@ def run_app(plan_path: Path, port: int = 0, embed_scheduler: bool = False) -> in
         threading.Thread(target=_scheduler_forever, args=(plan_path,), daemon=True).start()
 
     window = webview.create_window(
-        "conductor — ceci n'est pas un cron.",
+        "conductor",
         f"http://127.0.0.1:{port}/?app=1",   # ?app=1 → UI leaves room for traffic lights
-        width=1180, height=880, min_size=(760, 560),
+        width=1180, height=880, min_size=(820, 600),
         background_color="#FDF6E3",
+        easy_drag=False,  # we drive dragging via CSS drag regions + movable background
     )
-    webview.start(func=_unify_titlebar)  # blocks until the window closes
+    # apply native chrome once the window is realized (reliable timing)
+    try:
+        window.events.shown += lambda: _apply_native_chrome(window)
+    except Exception:
+        pass
+    webview.start()  # blocks until the window closes
     server.shutdown()
     return 0
 
 
-def _unify_titlebar() -> None:
-    """macOS: make the title bar transparent and let content flow under it, so
-    the traffic lights sit directly on the cream canvas (Hermes-style unified
-    chrome). No-op anywhere it can't apply — the app still works framed."""
+def _apply_native_chrome(window) -> None:
+    """macOS: unified titlebar — transparent, full-size content, hidden title,
+    so the traffic lights sit on the cream canvas (OrbStack-style). Dragging the
+    background moves the window. No-op on any platform it can't apply."""
     try:
         import AppKit
         from PyObjCTools import AppHelper
+        from webview.platforms.cocoa import BrowserView
 
         def apply() -> None:
-            for w in AppKit.NSApp.windows():
-                w.setStyleMask_(w.styleMask() | AppKit.NSWindowStyleMaskFullSizeContentView)
-                w.setTitlebarAppearsTransparent_(True)
-                w.setTitleVisibility_(AppKit.NSWindowTitleHidden)
-                w.setBackgroundColor_(
-                    AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(0.9922, 0.9647, 0.8902, 1.0))
+            inst = BrowserView.instances.get(window.uid)
+            nswindow = getattr(inst, "window", None) if inst else None
+            if nswindow is None:
+                return
+            mask = nswindow.styleMask() | (1 << 15)  # NSWindowStyleMaskFullSizeContentView
+            nswindow.setStyleMask_(mask)
+            nswindow.setTitlebarAppearsTransparent_(True)
+            nswindow.setTitleVisibility_(1)  # NSWindowTitleHidden
+            nswindow.setMovableByWindowBackground_(True)
+            cream = AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(
+                0.992, 0.965, 0.890, 1.0)
+            nswindow.setBackgroundColor_(cream)
 
         AppHelper.callAfter(apply)
     except Exception:

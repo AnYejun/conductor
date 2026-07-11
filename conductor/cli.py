@@ -272,6 +272,21 @@ def cmd_worker(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_node_script(args: argparse.Namespace) -> int:
+    """Emit the zero-dependency worker so it can be dropped on any machine."""
+    src = (Path(__file__).parent / "standalone_worker.py").read_text()
+    if args.out:
+        out = Path(args.out).expanduser()
+        out.write_text(src)
+        out.chmod(0o755)
+        console.print(f"wrote portable worker → {out}")
+        console.print("[dim]copy it to any machine (Python 3.8+, no pip) and run:[/dim]")
+        console.print(f"  python3 {out.name} --hub <hub-url> --node <name> --allow-shell")
+    else:
+        sys.stdout.write(src)
+    return 0
+
+
 def cmd_nodes(args: argparse.Namespace) -> int:
     import os
 
@@ -340,6 +355,11 @@ def main(argv: list[str] | None = None) -> int:
     p_nodes = sub.add_parser("nodes", help="show mesh nodes and queue state")
     p_nodes.add_argument("--hub", help="hub URL (default $CONDUCTOR_HUB or http://127.0.0.1:4747)")
     p_nodes.set_defaults(fn=cmd_nodes)
+
+    p_ns = sub.add_parser("node-script",
+                          help="emit a zero-dependency worker to drop on any machine (Python-only, no pip)")
+    p_ns.add_argument("--out", "-o", help="write to a file (default: print to stdout)")
+    p_ns.set_defaults(fn=cmd_node_script)
 
     p_mem = sub.add_parser("memory", help="inspect the agent's long-term memory")
     p_mem.add_argument("plan", nargs="?", default="plan.yaml")

@@ -129,6 +129,18 @@ conductor worker --hub http://100.64.0.3:4747 --node homebox --allow-shell
 conductor nodes --hub http://100.64.0.3:4747
 ```
 
+**Zero-install workers.** A remote machine doesn't need conductor (or even pip)
+to join — `conductor node-script -o conductor_worker.py` emits a single,
+**pure-stdlib** worker. Copy that one file to any box with Python 3 (a home
+server, an OrbStack Linux VM, a rented VPS, a friend's laptop) and run it:
+
+```bash
+python3 conductor_worker.py --hub http://100.64.0.3:4747 --node homebox --allow-shell
+```
+
+It handles `shell` and `claude` work (each machine `claude /login`s once); the
+full `conductor worker` is only needed for `kind: llm` (API-key) tasks.
+
 > **"Use my home computer from outside, with one Claude ID."** That's exactly
 > what the mesh is — and it needs **no credential copying**. Run
 > `claude /login` **once on each machine**; the mesh moves the *work* to the

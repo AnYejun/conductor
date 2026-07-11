@@ -89,6 +89,7 @@ def collect_state(plan: Plan, plan_path: Path) -> dict[str, Any]:
             run_state = json.loads(state_file.read_text())
         except json.JSONDecodeError:
             run_state = {}
+    details = run_state.get("details") or {}
     tasks = []
     for t in plan.tasks:
         w = t.window
@@ -102,9 +103,18 @@ def collect_state(plan: Plan, plan_path: Path) -> dict[str, Any]:
             "deadline": w.deadline.strftime("%H:%M") if w.deadline else None,
             "depends_on": t.depends_on,
             "state": (run_state.get("tasks") or {}).get(t.id, "—"),
+            "detail": details.get(t.id, ""),
             "agentic": t.agentic,
             "source": "inbox" if t.id in inbox_ids else "plan",
         })
+
+    # actionable health signal: did a claude task fail because the machine
+    # isn't logged in? (the single most common first-run snag)
+    login_needed = any(
+        t["kind"] == "claude" and t["state"] == "failed"
+        and ("login" in t["detail"].lower() or "authentication" in t["detail"].lower())
+        for t in tasks
+    )
 
     # ledger recents + totals
     recents = [{
@@ -127,6 +137,7 @@ def collect_state(plan: Plan, plan_path: Path) -> dict[str, Any]:
         "ledger": recents, "memories": memories,
         "hub": plan.mesh.hub,
         "nodes": _hub_nodes(plan.mesh.hub),
+        "login_needed": login_needed,
     }
 
 
@@ -170,19 +181,27 @@ PAGE = """<!DOCTYPE html>
 *{box-sizing:border-box;margin:0}
 html,body{height:100%}
 body{background:var(--cream);color:var(--ink);font:15px/1.6 -apple-system,"Helvetica Neue",Arial,sans-serif;overflow:hidden}
+.drag{position:fixed;top:0;left:0;right:0;height:38px;-webkit-app-region:drag;z-index:50}
+nav a,button,input,select,textarea,.card{-webkit-app-region:no-drag}
+body:not(.app) .drag{display:none}
 .shell{display:flex;height:100vh}
-aside{width:212px;flex:none;border-right:3px solid var(--ink);display:flex;flex-direction:column;padding:20px 14px 16px}
-body.app aside{padding-top:46px}
-.brand{display:flex;align-items:center;gap:10px;padding:0 6px 18px}
-.brand b{font-size:19px;letter-spacing:-.4px}
-.brand .v{display:block;font-size:11px;color:#999;font-weight:400}
-nav a{display:flex;justify-content:space-between;align-items:center;padding:8px 13px;margin:2px 0;border-radius:11px;font-weight:600;font-size:14px;cursor:pointer;border:2.5px solid transparent;user-select:none}
-nav a:hover{border-color:var(--ink);background:#fff}
+aside{width:224px;flex:none;background:#FAF3E0;border-right:2px solid var(--ink);display:flex;flex-direction:column;padding:18px 14px 16px}
+body.app aside{padding-top:48px}
+.brand{display:flex;align-items:center;gap:11px;padding:0 6px 8px}
+.brand b{font-size:20px;letter-spacing:-.5px}
+.brand .v{display:block;font-size:11px;color:#a89f86;font-weight:500}
+.navgroup{font-size:10px;font-weight:700;letter-spacing:.13em;color:#b3a98d;text-transform:uppercase;padding:14px 8px 5px}
+nav a{display:flex;justify-content:space-between;align-items:center;padding:7px 12px;margin:1px 0;border-radius:10px;font-weight:600;font-size:14px;cursor:pointer;border:2px solid transparent;user-select:none;transition:background .1s}
+nav a:hover{background:#fff}
 nav a.active{background:var(--gold);border-color:var(--ink)}
 nav a .n{font-size:11px;font-weight:700;background:#fff;border:2px solid var(--ink);border-radius:99px;padding:0 7px;min-width:22px;text-align:center}
-.side-foot{margin-top:auto;padding:0 6px;font-family:Georgia,serif;font-style:italic;font-size:12.5px;color:#999}
-main{flex:1;overflow-y:auto;padding:26px 28px 60px}
-body.app main{padding-top:46px}
+.side-foot{margin-top:auto;padding:0 8px;font-family:Georgia,serif;font-style:italic;font-size:12.5px;color:#b3a98d}
+main{flex:1;overflow-y:auto;padding:22px 30px 60px}
+body.app main{padding-top:48px}
+.livedot{display:inline-block;width:8px;height:8px;border-radius:99px;background:var(--teal);border:1.5px solid var(--ink);margin-right:6px;vertical-align:1px}
+.banner{display:flex;align-items:center;gap:12px;background:var(--gold);border:3px solid var(--ink);border-radius:14px;padding:13px 18px;margin-bottom:18px;font-size:14px}
+.banner b{font-weight:700}
+.banner code{background:#fff}
 .view{display:none;max-width:960px;margin:0 auto}
 .view.active{display:block}
 .vtitle{font-size:24px;font-weight:700;letter-spacing:-.4px;margin-bottom:4px}
@@ -230,26 +249,31 @@ form.sched button:hover{background:var(--teal)}
 code{font:12.5px ui-monospace,Menlo,monospace;background:#fff;border:1.5px solid var(--ink);border-radius:5px;padding:1px 6px}
 #meshhelp b{font-size:14px}#meshhelp{line-height:2.1}
 </style></head><body>
+<div class="drag"></div>
 <div class="shell">
 <aside>
   <div class="brand">
-    <svg width="42" height="42" viewBox="0 0 128 128"><rect x="4" y="4" width="120" height="120" rx="26" fill="#FDF6E3" stroke="#111" stroke-width="4"/><path d="M50 30 H74 L95 104 Q95 108 91 108 L33 108 Q29 108 29 104 Z" fill="#2456F5" stroke="#111" stroke-width="4.5"/><path d="M42 76 Q62 58 82 76 Q62 94 42 76 Z" fill="#fff" stroke="#111" stroke-width="4"/><circle cx="62" cy="76" r="9.5" fill="#27DBA2" stroke="#111" stroke-width="3"/><circle cx="62" cy="76" r="4.5" fill="#111"/><circle cx="64.5" cy="73" r="1.8" fill="#fff"/><line x1="86" y1="33" x2="98" y2="21" stroke="#111" stroke-width="6" stroke-linecap="round"/><circle cx="104" cy="15" r="7" fill="#FFB020" stroke="#111" stroke-width="4"/></svg>
+    <svg width="40" height="40" viewBox="0 0 128 128"><rect x="4" y="4" width="120" height="120" rx="26" fill="#FDF6E3" stroke="#111" stroke-width="4"/><path d="M50 30 H74 L95 104 Q95 108 91 108 L33 108 Q29 108 29 104 Z" fill="#2456F5" stroke="#111" stroke-width="4.5"/><path d="M42 76 Q62 58 82 76 Q62 94 42 76 Z" fill="#fff" stroke="#111" stroke-width="4"/><circle cx="62" cy="76" r="9.5" fill="#27DBA2" stroke="#111" stroke-width="3"/><circle cx="62" cy="76" r="4.5" fill="#111"/><circle cx="64.5" cy="73" r="1.8" fill="#fff"/><line x1="86" y1="33" x2="98" y2="21" stroke="#111" stroke-width="6" stroke-linecap="round"/><circle cx="104" cy="15" r="7" fill="#FFB020" stroke="#111" stroke-width="4"/></svg>
     <div><b>conductor</b><span class="v" id="planname">plan.yaml</span></div>
   </div>
   <nav id="nav">
+    <div class="navgroup">monitor</div>
     <a data-v="overview" class="active">overview</a>
     <a data-v="timeline">timeline</a>
+    <a data-v="runs">runs <span class="n" id="n-runs">0</span></a>
+    <div class="navgroup">control</div>
     <a data-v="schedule">schedule</a>
     <a data-v="tasks">tasks <span class="n" id="n-tasks">0</span></a>
-    <a data-v="runs">runs <span class="n" id="n-runs">0</span></a>
+    <div class="navgroup">system</div>
     <a data-v="memory">memory <span class="n" id="n-mem">0</span></a>
     <a data-v="nodes">machines <span class="n" id="n-nodes">0</span></a>
   </nav>
-  <div class="side-foot">ceci n'est pas<br>un cron.<br><br><span id="ts">…</span></div>
+  <div class="side-foot"><span class="livedot"></span><span id="ts">…</span></div>
 </aside>
 <main>
   <section class="view active" id="v-overview">
     <div class="vtitle">overview</div><div class="vsub">the metronome that watches your spend</div>
+    <div id="banner"></div>
     <div class="stats" id="counts"></div>
     <div class="grid">
       <div class="card" style="margin:0"><h2>api budget <small>usd, hard gate</small></h2><div id="budget"></div></div>
@@ -377,8 +401,11 @@ async function tick(){
       :'<div class="empty">hub is up, but no workers have joined yet — run <code>conductor worker --hub '+esc(d.hub)+' --node &lt;name&gt; --allow-shell</code> on each machine</div>');
   document.getElementById("meshhelp").innerHTML=
     `<b>1.</b> On this machine (the hub): <code>conductor hub --host &lt;tailnet-ip&gt;</code><br>`+
-    `<b>2.</b> On each computer you want to use: <code>claude /login</code> once, then <code>conductor worker --hub ${d.hub?esc(d.hub):"http://&lt;ip&gt;:4747"} --node home --allow-shell</code><br>`+
-    `<b>3.</b> Schedule any task with <b>runs on = home</b> — it executes there, on that machine's own Claude login. Your credentials never leave it.`;
+    `<b>2.</b> Grab the zero-install worker: <code>conductor node-script -o conductor_worker.py</code>, copy it to any machine (a home server, an OrbStack Linux VM, a friend's box — just needs Python 3, no pip).<br>`+
+    `<b>3.</b> There, <code>claude /login</code> once, then <code>python3 conductor_worker.py --hub ${d.hub?esc(d.hub):"http://&lt;ip&gt;:4747"} --node home --allow-shell</code><br>`+
+    `<b>4.</b> Schedule any task with <b>runs on = home</b> — it runs there, on that machine's own Claude login. Your credentials never leave it.`;
+  document.getElementById("banner").innerHTML=d.login_needed?
+    `<div class="banner"><span style="font-size:20px">⚑</span><div>A <b>claude</b> task failed because this machine isn't signed in. Run <code>claude /login</code> in a terminal, then the scheduler will retry automatically.</div></div>`:"";
   const cnt={};d.tasks.forEach(t=>cnt[t.state]=(cnt[t.state]||0)+1);
   document.getElementById("counts").innerHTML=["done","running","pending","failed"].map(s=>
     `<div class="stat"><b>${cnt[s]||0}</b><span>${s}</span></div>`).join("")+

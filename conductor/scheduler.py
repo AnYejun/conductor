@@ -57,6 +57,7 @@ class Scheduler:
         self.state: dict[str, State] = {t.id: State.pending for t in plan.tasks}
         self._running: set[asyncio.Task] = set()
         self._defer_until: dict[str, dt.datetime] = {}  # budget/quota-deferred backoff
+        self._detail: dict[str, str] = {}  # last human-readable note per task
         self.state_path: Optional[Path] = outputs_dir.parent / "state.json"
         self._write_state()
 
@@ -70,6 +71,7 @@ class Scheduler:
                 "updated_at": dt.datetime.now().astimezone().isoformat(),
                 "tasks": {tid: s.value for tid, s in self.state.items()},
                 "defer_until": {tid: t.isoformat() for tid, t in self._defer_until.items()},
+                "details": dict(self._detail),
             }
             self.state_path.write_text(json.dumps(payload, indent=2))
         except OSError:
@@ -171,6 +173,8 @@ class Scheduler:
         else:
             self.state[task.id] = State.failed
             self._log(task.id, "failed", result.detail)
+        if result.detail:
+            self._detail[task.id] = result.detail
         self._write_state()
 
     def _dispatch(self, tasks: list[Task]) -> None:
