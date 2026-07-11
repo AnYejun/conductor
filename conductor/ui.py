@@ -137,14 +137,27 @@ PAGE = """<!DOCTYPE html>
 <style>
 :root{--cream:#FDF6E3;--ink:#111111;--cobalt:#2456F5;--teal:#27DBA2;--gold:#FFB020;--red:#FF5A5A;--paper:#FFFCF3}
 *{box-sizing:border-box;margin:0}
-body{background:var(--cream);color:var(--ink);font:15px/1.6 -apple-system,"Helvetica Neue",Arial,sans-serif;padding:28px 20px 60px}
-.wrap{max-width:1040px;margin:0 auto}
-header{display:flex;align-items:center;gap:18px;margin-bottom:6px}
-header svg{flex:none}
-h1{font-size:30px;letter-spacing:-.5px;font-weight:700}
-.tagline{font-family:Georgia,serif;font-style:italic;color:#555;margin-bottom:26px}
+html,body{height:100%}
+body{background:var(--cream);color:var(--ink);font:15px/1.6 -apple-system,"Helvetica Neue",Arial,sans-serif;overflow:hidden}
+.shell{display:flex;height:100vh}
+aside{width:212px;flex:none;border-right:3px solid var(--ink);display:flex;flex-direction:column;padding:20px 14px 16px}
+body.app aside{padding-top:46px}
+.brand{display:flex;align-items:center;gap:10px;padding:0 6px 18px}
+.brand b{font-size:19px;letter-spacing:-.4px}
+.brand .v{display:block;font-size:11px;color:#999;font-weight:400}
+nav a{display:flex;justify-content:space-between;align-items:center;padding:8px 13px;margin:2px 0;border-radius:11px;font-weight:600;font-size:14px;cursor:pointer;border:2.5px solid transparent;user-select:none}
+nav a:hover{border-color:var(--ink);background:#fff}
+nav a.active{background:var(--gold);border-color:var(--ink)}
+nav a .n{font-size:11px;font-weight:700;background:#fff;border:2px solid var(--ink);border-radius:99px;padding:0 7px;min-width:22px;text-align:center}
+.side-foot{margin-top:auto;padding:0 6px;font-family:Georgia,serif;font-style:italic;font-size:12.5px;color:#999}
+main{flex:1;overflow-y:auto;padding:26px 28px 60px}
+body.app main{padding-top:46px}
+.view{display:none;max-width:960px;margin:0 auto}
+.view.active{display:block}
+.vtitle{font-size:24px;font-weight:700;letter-spacing:-.4px;margin-bottom:4px}
+.vsub{font-family:Georgia,serif;font-style:italic;color:#777;margin-bottom:20px;font-size:14px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin-bottom:16px}
-.card{background:var(--paper);border:3px solid var(--ink);border-radius:16px;padding:18px 20px}
+.card{background:var(--paper);border:3px solid var(--ink);border-radius:16px;padding:18px 20px;margin-bottom:16px}
 .card h2{font-size:13px;text-transform:uppercase;letter-spacing:.12em;margin-bottom:12px;display:flex;justify-content:space-between;align-items:baseline}
 .card h2 small{font-weight:400;text-transform:none;letter-spacing:0;color:#777;font-family:Georgia,serif;font-style:italic}
 .gauge{margin:10px 0 4px}
@@ -152,6 +165,10 @@ h1{font-size:30px;letter-spacing:-.5px;font-weight:700}
 .bar{height:16px;border:2.5px solid var(--ink);border-radius:9px;background:#fff;overflow:hidden}
 .bar i{display:block;height:100%;transition:width .6s}
 .muted{color:#777;font-size:12.5px}
+.stats{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+.stat{background:var(--paper);border:3px solid var(--ink);border-radius:14px;padding:10px 18px;text-align:center}
+.stat b{display:block;font-size:22px}
+.stat span{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#666}
 table{width:100%;border-collapse:collapse;font-size:13.5px}
 th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:#666;padding:4px 8px 6px;border-bottom:2px solid var(--ink)}
 td{padding:7px 8px;border-bottom:1px solid #e4dcc6;vertical-align:top}
@@ -162,7 +179,6 @@ tr:last-child td{border-bottom:none}
 .s-skipped{background:#ddd} .k-claude{background:var(--gold)}
 .tag{display:inline-block;background:#fff;border:1.5px solid var(--ink);border-radius:99px;padding:0 8px;font-size:11px;margin:1px 2px}
 .eye{display:inline-block;vertical-align:-2px;margin-right:2px}
-footer{margin-top:26px;text-align:center;color:#999;font-size:12px;font-family:Georgia,serif;font-style:italic}
 .empty{color:#999;font-style:italic;font-family:Georgia,serif;padding:8px 0}
 .lane{display:flex;align-items:center;gap:10px;margin:7px 0}
 .lane .nm{flex:none;width:150px;font-size:13px;font-weight:600;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -180,38 +196,76 @@ form.sched button:hover{background:var(--teal)}
 #formmsg{grid-column:1/-1;font-size:13px;font-family:Georgia,serif;font-style:italic}
 .del{cursor:pointer;border:none;background:none;font-size:14px;color:#999;padding:0 4px}
 .del:hover{color:var(--red)}
-</style></head><body><div class="wrap">
-<header>
-<svg width="64" height="64" viewBox="0 0 128 128"><rect x="4" y="4" width="120" height="120" rx="26" fill="#FDF6E3" stroke="#111" stroke-width="4"/><path d="M50 30 H74 L95 104 Q95 108 91 108 L33 108 Q29 108 29 104 Z" fill="#2456F5" stroke="#111" stroke-width="4.5"/><path d="M42 76 Q62 58 82 76 Q62 94 42 76 Z" fill="#fff" stroke="#111" stroke-width="4"/><circle cx="62" cy="76" r="9.5" fill="#27DBA2" stroke="#111" stroke-width="3"/><circle cx="62" cy="76" r="4.5" fill="#111"/><circle cx="64.5" cy="73" r="1.8" fill="#fff"/><line x1="86" y1="33" x2="100" y2="19" stroke="#111" stroke-width="6" stroke-linecap="round"/><circle cx="106" cy="13" r="7" fill="#FFB020" stroke="#111" stroke-width="4"/></svg>
-<div><h1>conductor</h1><div class="tagline">ceci n'est pas un cron.</div></div>
-</header>
-<div class="grid">
-<div class="card"><h2>api budget <small>usd, hard gate</small></h2><div id="budget"></div></div>
-<div class="card"><h2>subscription quota <small>burn units, auto defer/downgrade</small></h2><div id="quota"></div></div>
-</div>
-<div class="card" style="margin-bottom:16px"><h2>today's timeline <small>windows over 24h · red line = now</small></h2><div id="timeline"></div></div>
-<div class="card" style="margin-bottom:16px"><h2>schedule a task <small>lands in .conductor/inbox.yaml — a running scheduler picks it up live</small></h2>
-<form class="sched" id="schedform" onsubmit="return schedule(event)">
-<div><label>id</label><input name="id" placeholder="nightly-report" required></div>
-<div><label>kind</label><select name="kind" onchange="kindswap(this.value)"><option value="claude">claude (subscription)</option><option value="llm">llm (api)</option><option value="shell">shell</option></select></div>
-<div id="f-model"><label>model</label><input name="model" placeholder="sonnet" value="sonnet"></div>
-<div><label>earliest</label><input name="earliest" type="time"></div>
-<div><label>deadline</label><input name="deadline" type="time"></div>
-<div><label>if over budget</label><select name="policy"><option>defer</option><option>downgrade</option><option>skip</option></select></div>
-<div><label>runs on</label><input name="runs_on" placeholder="local"></div>
-<textarea name="prompt" id="f-prompt" placeholder="What should the agent do?" required></textarea>
-<button>schedule it</button><div id="formmsg"></div>
-</form></div>
-<div class="card" style="margin-bottom:16px"><h2>tasks <small id="planname"></small></h2><div id="tasks"></div></div>
-<div class="grid">
-<div class="card"><h2>recent runs</h2><div id="ledger"></div></div>
-<div class="card"><h2>long-term memory <small>what it learned</small></h2><div id="memory"></div></div>
-</div>
-<footer>the metronome that watches your spend — refreshed <span id="ts">…</span></footer>
+</style></head><body>
+<div class="shell">
+<aside>
+  <div class="brand">
+    <svg width="42" height="42" viewBox="0 0 128 128"><rect x="4" y="4" width="120" height="120" rx="26" fill="#FDF6E3" stroke="#111" stroke-width="4"/><path d="M50 30 H74 L95 104 Q95 108 91 108 L33 108 Q29 108 29 104 Z" fill="#2456F5" stroke="#111" stroke-width="4.5"/><path d="M42 76 Q62 58 82 76 Q62 94 42 76 Z" fill="#fff" stroke="#111" stroke-width="4"/><circle cx="62" cy="76" r="9.5" fill="#27DBA2" stroke="#111" stroke-width="3"/><circle cx="62" cy="76" r="4.5" fill="#111"/><circle cx="64.5" cy="73" r="1.8" fill="#fff"/><line x1="86" y1="33" x2="98" y2="21" stroke="#111" stroke-width="6" stroke-linecap="round"/><circle cx="104" cy="15" r="7" fill="#FFB020" stroke="#111" stroke-width="4"/></svg>
+    <div><b>conductor</b><span class="v" id="planname">plan.yaml</span></div>
+  </div>
+  <nav id="nav">
+    <a data-v="overview" class="active">overview</a>
+    <a data-v="timeline">timeline</a>
+    <a data-v="schedule">schedule</a>
+    <a data-v="tasks">tasks <span class="n" id="n-tasks">0</span></a>
+    <a data-v="runs">runs <span class="n" id="n-runs">0</span></a>
+    <a data-v="memory">memory <span class="n" id="n-mem">0</span></a>
+  </nav>
+  <div class="side-foot">ceci n'est pas<br>un cron.<br><br><span id="ts">…</span></div>
+</aside>
+<main>
+  <section class="view active" id="v-overview">
+    <div class="vtitle">overview</div><div class="vsub">the metronome that watches your spend</div>
+    <div class="stats" id="counts"></div>
+    <div class="grid">
+      <div class="card" style="margin:0"><h2>api budget <small>usd, hard gate</small></h2><div id="budget"></div></div>
+      <div class="card" style="margin:0"><h2>subscription quota <small>auto defer/downgrade</small></h2><div id="quota"></div></div>
+    </div>
+  </section>
+  <section class="view" id="v-timeline">
+    <div class="vtitle">timeline</div><div class="vsub">every task's window over 24h — the red line is now</div>
+    <div class="card"><div id="timeline"></div></div>
+  </section>
+  <section class="view" id="v-schedule">
+    <div class="vtitle">schedule</div><div class="vsub">lands in .conductor/inbox.yaml — a running scheduler picks it up live</div>
+    <div class="card">
+    <form class="sched" id="schedform" onsubmit="return schedule(event)">
+    <div><label>id</label><input name="id" placeholder="nightly-report" required></div>
+    <div><label>kind</label><select name="kind" onchange="kindswap(this.value)"><option value="claude">claude (subscription)</option><option value="llm">llm (api)</option><option value="shell">shell</option></select></div>
+    <div id="f-model"><label>model</label><input name="model" placeholder="sonnet" value="sonnet"></div>
+    <div><label>earliest</label><input name="earliest" type="time"></div>
+    <div><label>deadline</label><input name="deadline" type="time"></div>
+    <div><label>if over budget</label><select name="policy"><option>defer</option><option>downgrade</option><option>skip</option></select></div>
+    <div><label>runs on</label><input name="runs_on" placeholder="local"></div>
+    <textarea name="prompt" id="f-prompt" placeholder="What should the agent do?" required></textarea>
+    <button>schedule it</button><div id="formmsg"></div>
+    </form></div>
+  </section>
+  <section class="view" id="v-tasks">
+    <div class="vtitle">tasks</div><div class="vsub">plan.yaml + dashboard inbox</div>
+    <div class="card"><div id="tasks"></div></div>
+  </section>
+  <section class="view" id="v-runs">
+    <div class="vtitle">runs</div><div class="vsub">what actually happened, and what it cost</div>
+    <div class="card"><div id="ledger"></div></div>
+  </section>
+  <section class="view" id="v-memory">
+    <div class="vtitle">memory</div><div class="vsub">what the agents learned — inspect, edit, or delete the files anytime</div>
+    <div class="card"><div id="memory"></div></div>
+  </section>
+</main>
 </div>
 <script>
+if(new URLSearchParams(location.search).has("app"))document.body.classList.add("app");
 const fmt=n=>n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(1)+"k":String(n);
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function nav(v){
+  document.querySelectorAll("nav a").forEach(a=>a.classList.toggle("active",a.dataset.v===v));
+  document.querySelectorAll(".view").forEach(s=>s.classList.toggle("active",s.id==="v-"+v));
+  history.replaceState(null,"",location.pathname+location.search+"#"+v);
+}
+document.querySelectorAll("nav a").forEach(a=>a.onclick=()=>nav(a.dataset.v));
+if(location.hash)nav(location.hash.slice(1));
 function gauge(label,used,cap,unit,reset){
   if(cap==null||!cap) return `<div class="gauge"><div class="lbl"><span>${label}</span><span>${fmt(used)} ${unit} · no ceiling set</span></div><div class="muted">calibrate in plan.yaml to enable the gate</div></div>`;
   const p=Math.min(100,100*used/cap);
@@ -265,7 +319,14 @@ kindswap("claude");
 async function tick(){
   let d;try{d=await (await fetch("/api/state")).json()}catch(e){return}
   document.getElementById("planname").textContent=d.plan;
-  document.getElementById("ts").textContent=new Date(d.generated_at).toLocaleTimeString();
+  document.getElementById("ts").textContent="refreshed "+new Date(d.generated_at).toLocaleTimeString();
+  document.getElementById("n-tasks").textContent=d.tasks.length;
+  document.getElementById("n-runs").textContent=d.ledger.length;
+  document.getElementById("n-mem").textContent=d.memories.length;
+  const cnt={};d.tasks.forEach(t=>cnt[t.state]=(cnt[t.state]||0)+1);
+  document.getElementById("counts").innerHTML=["done","running","pending","failed"].map(s=>
+    `<div class="stat"><b>${cnt[s]||0}</b><span>${s}</span></div>`).join("")+
+    `<div class="stat"><b>$${d.budget.spent_today.toFixed(2)}</b><span>spent today</span></div>`;
   const b=d.budget;
   document.getElementById("budget").innerHTML=
     gauge("today",b.spent_today,b.daily_usd,"$")+(b.hourly_usd?gauge("rolling hour",b.spent_hour,b.hourly_usd,"$"):"");
@@ -274,7 +335,7 @@ async function tick(){
     gauge("5-hour window",q.five_hour.burn,q.five_hour.ceiling,"tok",q.five_hour.resets_at)+
     gauge("weekly window",q.weekly.burn,q.weekly.ceiling,"tok",q.weekly.resets_at)+
     `<div class="muted">reserve ${(q.reserve*100).toFixed(0)}% kept for interactive use</div>`;
-  document.getElementById("timeline").innerHTML=d.tasks.length?timeline(d.tasks):'<div class="empty">no tasks yet — schedule one above</div>';
+  document.getElementById("timeline").innerHTML=d.tasks.length?timeline(d.tasks):'<div class="empty">no tasks yet — schedule one</div>';
   document.getElementById("tasks").innerHTML=d.tasks.length?`<table><tr><th>task</th><th>kind</th><th>where</th><th>window</th><th>deps</th><th>state</th><th></th></tr>`+
     d.tasks.map(t=>`<tr><td><b>${esc(t.id)}</b>${t.agentic?' <span class="tag">agentic</span>':''}${t.source==="inbox"?' <span class="tag" style="background:var(--gold)">inbox</span>':''}</td>
     <td><span class="chip ${t.kind==="claude"?"k-claude":""}">${esc(t.kind)}${t.model?" · "+esc(t.model):""}</span></td>
@@ -289,7 +350,7 @@ async function tick(){
   document.getElementById("memory").innerHTML=d.memories.length?d.memories.map(m=>
     `<div style="padding:7px 0;border-bottom:1px solid #e4dcc6">
      <svg class="eye" width="15" height="11" viewBox="0 0 40 26"><path d="M2 13 Q20 -3 38 13 Q20 29 2 13 Z" fill="#fff" stroke="#111" stroke-width="3"/><circle cx="20" cy="13" r="6" fill="#27DBA2" stroke="#111" stroke-width="2"/><circle cx="20" cy="13" r="2.6" fill="#111"/></svg>
-     <b>${esc(m.summary)}</b><br><span class="muted">${m.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join("")} ${esc(m.source)} · ${m.created?new Date(m.created).toLocaleDateString():""}</span></div>`).join(""):'<div class="empty">the agent hasn\\'t learned anything yet — run an agentic task</div>';
+     <b>${esc(m.summary)}</b><br><span class="muted">${m.tags.map(t=>`<span class="tag">${esc(t)}</span>`).join("")} ${esc(m.source)} · ${m.created?new Date(m.created).toLocaleDateString():""}</span></div>`).join(""):'<div class="empty">no lessons learned yet — run an agentic task</div>';
 }
 tick();setInterval(tick,3000);
 </script></body></html>"""
@@ -306,6 +367,7 @@ def make_handler(plan_path: Path):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")  # dashboards must never go stale
             self.end_headers()
             self.wfile.write(body)
 

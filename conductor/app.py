@@ -42,10 +42,31 @@ def run_app(plan_path: Path, port: int = 0) -> int:
 
     window = webview.create_window(
         "conductor — ceci n'est pas un cron.",
-        f"http://127.0.0.1:{port}",
+        f"http://127.0.0.1:{port}/?app=1",   # ?app=1 → UI leaves room for traffic lights
         width=1180, height=880, min_size=(760, 560),
         background_color="#FDF6E3",
     )
-    webview.start()  # blocks until the window closes
+    webview.start(func=_unify_titlebar)  # blocks until the window closes
     server.shutdown()
     return 0
+
+
+def _unify_titlebar() -> None:
+    """macOS: make the title bar transparent and let content flow under it, so
+    the traffic lights sit directly on the cream canvas (Hermes-style unified
+    chrome). No-op anywhere it can't apply — the app still works framed."""
+    try:
+        import AppKit
+        from PyObjCTools import AppHelper
+
+        def apply() -> None:
+            for w in AppKit.NSApp.windows():
+                w.setStyleMask_(w.styleMask() | AppKit.NSWindowStyleMaskFullSizeContentView)
+                w.setTitlebarAppearsTransparent_(True)
+                w.setTitleVisibility_(AppKit.NSWindowTitleHidden)
+                w.setBackgroundColor_(
+                    AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(0.9922, 0.9647, 0.8902, 1.0))
+
+        AppHelper.callAfter(apply)
+    except Exception:
+        pass
