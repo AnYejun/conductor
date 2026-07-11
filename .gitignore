@@ -4,3 +4,5 @@ __pycache__/
 dist/
 .pytest_cache/
 plan.yaml
+build/
+dist/

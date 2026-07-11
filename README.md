@@ -237,8 +237,23 @@ no Electron):
 
 ```bash
 pip install "conductor-agent[app]"
-conductor app
+conductor app                # native window
+conductor app --scheduler    # + run the scheduler inside the app
 ```
+
+Want a real double-clickable **Conductor.app** (embedded scheduler, custom
+icon, DMG)? Build it locally:
+
+```bash
+pip install pyinstaller pywebview
+./packaging/build_app.sh     # → dist/Conductor.app + dist/Conductor-<v>.dmg
+```
+
+First launch bootstraps `~/.conductor/plan.yaml` with a starter plan and runs
+it — no terminal needed. `kind: claude` tasks use this machine's own
+`claude /login` session (nested agent-session credentials are deliberately
+stripped). Local ad-hoc signing only; distributing to others needs a
+Developer ID + notarization.
 - **Memory**: the recall briefing is injected via `--append-system-prompt`,
   and if the task has a write-capable tool, it's instructed to save lessons
   into the same `.conductor/memory/` store the built-in agent uses.

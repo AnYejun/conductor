@@ -231,11 +231,14 @@ def cmd_ui(args: argparse.Namespace) -> int:
 
 
 def cmd_app(args: argparse.Namespace) -> int:
-    from .app import run_app
+    from .app import ensure_default_plan, run_app
 
     plan_path = Path(args.plan).resolve()
+    if not plan_path.exists() and args.plan == "plan.yaml":
+        plan_path = ensure_default_plan()   # app-style: fall back to ~/.conductor
+        console.print(f"[dim]no plan.yaml here — using {plan_path}[/dim]")
     console.print("[bold]conductor app[/bold] — opening the dashboard in a native window…")
-    return run_app(plan_path, port=args.port)
+    return run_app(plan_path, port=args.port, embed_scheduler=args.scheduler)
 
 
 def cmd_hub(args: argparse.Namespace) -> int:
@@ -357,6 +360,8 @@ def main(argv: list[str] | None = None) -> int:
     p_app = sub.add_parser("app", help="the dashboard as a native desktop window (pywebview)")
     p_app.add_argument("plan", nargs="?", default="plan.yaml")
     p_app.add_argument("--port", type=int, default=0, help="UI port (default: auto)")
+    p_app.add_argument("--scheduler", action="store_true",
+                       help="also run the scheduler inside the app (what the packaged .app does)")
     p_app.set_defaults(fn=cmd_app)
 
     args = parser.parse_args(argv)

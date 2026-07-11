@@ -15,8 +15,11 @@ observability but does NOT count against the plan's USD budget.
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -37,8 +40,35 @@ created: <ISO 8601 timestamp>
 Save one lesson per file. Don't record what the workspace already makes obvious."""
 
 
+def _sanitized_env() -> dict[str, str]:
+    """Strip nested-harness variables so the spawned claude authenticates as
+    THIS machine's own login — not as a child of whatever agent session spawned
+    us (running conductor from inside Claude Code would otherwise leak its
+    session auth into scheduled tasks, with confusing results)."""
+    return {
+        k: v for k, v in os.environ.items()
+        if not (k.startswith("CLAUDE") or k in ("BAGGAGE", "AI_AGENT", "ANTHROPIC_BASE_URL"))
+    }
+
+
+def _login_shell_argv(cmd: list[str]) -> list[str]:
+    """Run through the user's login shell: a Finder-launched .app gets launchd's
+    bare PATH (no nvm/npm dirs), so `claude` and `node` resolve exactly as they
+    do in the user's own terminal."""
+    if sys.platform == "win32":
+        return cmd
+    shell = os.environ.get("SHELL") or ("/bin/zsh" if sys.platform == "darwin" else "/bin/bash")
+    return [shell, "-lc", shlex.join(cmd)]
+
+
 def claude_available() -> bool:
-    return shutil.which("claude") is not None
+    if shutil.which("claude") is not None:
+        return True
+    try:
+        probe = _login_shell_argv(["command", "-v", "claude"])
+        return subprocess.run(probe, capture_output=True, timeout=15).returncode == 0
+    except Exception:
+        return False
 
 
 def build_command(payload: dict[str, Any]) -> list[str]:
@@ -65,8 +95,8 @@ def run_claude(payload: dict[str, Any], workdir: Optional[str] = None) -> dict[s
     cmd = build_command(payload)
     timeout = payload.get("timeout_seconds", 600)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout, cwd=workdir)
+        proc = subprocess.run(_login_shell_argv(cmd), capture_output=True, text=True,
+                              timeout=timeout, cwd=workdir, env=_sanitized_env())
     except subprocess.TimeoutExpired:
         return {"is_error": True, "returncode": -1,
                 "error": f"claude -p timed out after {timeout}s"}
@@ -82,8 +112,15 @@ def run_claude(payload: dict[str, Any], workdir: Optional[str] = None) -> dict[s
                 "error": "unparseable claude output: " + proc.stdout[-2000:]}
 
     usage = data.get("usage") or {}
+    is_error = bool(data.get("is_error"))
+    out: dict[str, Any] = {}
+    if is_error:
+        # claude reports runtime failures (e.g. auth: "Please run /login")
+        # inside `result` — surface them as the error detail
+        out["error"] = str(data.get("result", ""))[:400]
     return {
-        "is_error": bool(data.get("is_error")),
+        **out,
+        "is_error": is_error,
         "returncode": proc.returncode,
         "text": data.get("result", ""),
         "reported_cost_usd": data.get("total_cost_usd", 0.0),
