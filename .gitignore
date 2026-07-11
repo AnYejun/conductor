@@ -6,3 +6,8 @@ dist/
 plan.yaml
 build/
 dist/
+dist-sidecar/
+build-sidecar/
+desktop-tauri/src-tauri/target/
+desktop-tauri/src-tauri/binaries/
+desktop-tauri/node_modules/

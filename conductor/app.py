@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import os
 import socket
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 from .schema import load_plan
 from .ui import serve as ui_serve
@@ -180,3 +182,27 @@ def _apply_native_chrome(window, log) -> None:
 def desktop_main() -> int:
     """Entry point for the packaged .app: default plan + embedded scheduler."""
     return run_app(ensure_default_plan(), embed_scheduler=True)
+
+
+def run_headless(plan_path: Path, port: int, parent_pid: Optional[int] = None) -> int:
+    """The engine without a window — what the Tauri shell runs as a sidecar.
+    UI server + serve-mode scheduler in this process; prints a READY line so
+    the shell knows when to show the window. If parent_pid is given, exits
+    when that process dies (no orphaned engines)."""
+    server = ui_serve(load_plan(plan_path), plan_path, host="127.0.0.1", port=port)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(target=_scheduler_forever, args=(plan_path,), daemon=True).start()
+    print(f"CONDUCTOR_SERVE_READY port={port}", flush=True)
+
+    try:
+        while True:
+            if parent_pid is not None:
+                try:
+                    os.kill(parent_pid, 0)   # signal 0 = existence check
+                except OSError:
+                    break                     # shell died — follow it
+            time.sleep(2)
+    except KeyboardInterrupt:
+        pass
+    server.shutdown()
+    return 0

@@ -295,7 +295,7 @@ form.sched button:hover{background:var(--teal)}
 code{font:12.5px ui-monospace,Menlo,monospace;background:#fff;border:1.5px solid var(--ink);border-radius:5px;padding:1px 6px}
 #meshhelp b{font-size:14px}#meshhelp{line-height:2.1}
 </style></head><body>
-<div class="drag"></div>
+<div class="drag" data-tauri-drag-region></div>
 <div class="shell">
 <aside>
   <div class="brand">
