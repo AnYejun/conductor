@@ -1,10 +1,25 @@
-# CONDUCTOR 🎼
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo-light.svg" alt="CONDUCTOR" width="120">
+  </picture>
+</p>
 
-**Token-budget-aware task scheduler for the Claude API.**
+<h1 align="center">conductor</h1>
+
+<p align="center"><b>Put your Claude to work — on a schedule, on a budget, on your own machines.</b></p>
+
+<p align="center">
+  <a href="https://github.com/AnYejun/conductor/actions/workflows/ci.yml"><img src="https://github.com/AnYejun/conductor/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="python 3.10+">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT">
+</p>
 
 Declare your tasks once — time window, cost budget, priority — and the runner
 executes them automatically, *inside* the budget. Like cron, but the unit of
-scheduling is dollars, not just clock time.
+scheduling is dollars, not just clock time. Runs on the Claude API, on your
+**Claude subscription** (headless Claude Code, no key), or across **your own
+machines** as a tiny personal cloud.
 
 ```yaml
 budget:
