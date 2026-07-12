@@ -202,6 +202,11 @@ class Plan(BaseModel):
         return sorted(cheaper, key=lambda k: self.models[k].price_total, reverse=True)
 
 
+def rooms_path(plan_path: Path) -> Path:
+    """UI-created agent rooms live in a machine-owned overlay, like the inbox."""
+    return plan_path.parent / ".conductor" / "rooms.yaml"
+
+
 def inbox_path(plan_path: Path) -> Path:
     """UI-scheduled tasks live in a machine-owned overlay file, so the
     dashboard never has to rewrite (and risk mangling) your plan.yaml."""
@@ -222,6 +227,12 @@ def load_inbox_tasks(plan: Plan, plan_path: Path) -> list[Task]:
             continue
         if t.model is not None and t.model not in plan.models:
             continue
+        if t.workspace is not None:
+            if t.workspace not in plan.workspaces:
+                continue
+            ws = plan.workspaces[t.workspace]
+            if t.runs_on is None and ws.node:
+                t.runs_on = ws.node
         _resolve_paths(t, plan_path)
         known.add(t.id)
         out.append(t)
@@ -246,6 +257,15 @@ def _resolve_paths(t: Task, plan_path: Path) -> None:
 def load_plan(path: Path | str, include_inbox: bool = True) -> Plan:
     path = Path(path)
     data = yaml.safe_load(path.read_text())
+    if include_inbox:
+        # merge UI-created rooms BEFORE validation so tasks may reference them
+        rp = rooms_path(path)
+        if rp.exists():
+            overlay = yaml.safe_load(rp.read_text()) or {}
+            ws = data.setdefault("workspaces", {}) or {}
+            for name, spec in overlay.items():
+                ws.setdefault(name, spec)  # plan.yaml wins on collision
+            data["workspaces"] = ws
     plan = Plan.model_validate(data)
     for t in plan.tasks:
         _resolve_paths(t, path)

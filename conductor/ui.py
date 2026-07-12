@@ -139,17 +139,31 @@ def collect_state(plan: Plan, plan_path: Path) -> dict[str, Any]:
         "summary": m.summary, "tags": m.tags, "source": m.source, "created": m.created,
     } for m in memory.all()[::-1][:30]]
 
+    # per-agent totals: who is eating the tokens
+    totals = sorted(({
+        "task_id": tid, "runs": row["runs"],
+        "in": row["input_tokens"], "out": row["output_tokens"],
+        "cost_usd": round(row["cost_usd"], 4), "last": row["last_run"],
+    } for tid, row in ledger.by_task().items()),
+        key=lambda r: (r["in"] + r["out"]), reverse=True)[:10]
+
+    rooms = [{"name": name, "image": ws.image, "node": ws.node,
+              "setup": bool(ws.setup)} for name, ws in plan.workspaces.items()]
+
     return {
         "plan": plan_path.name,
         "generated_at": dt.datetime.now().astimezone().isoformat(),
         "scheduler_updated_at": run_state.get("updated_at"),
         "budget": budget, "quota": quota, "tasks": tasks,
         "ledger": recents, "memories": memories,
-        "hub": plan.mesh.hub,
-        "nodes": _hub_nodes(plan.mesh.hub),
+        "hub": plan.mesh.hub or __import__("os").environ.get("CONDUCTOR_HUB"),
+        "nodes": _hub_nodes(plan.mesh.hub or __import__("os").environ.get("CONDUCTOR_HUB")),
         "login_needed": login_needed,
         "claude_missing": claude_missing,
         "has_failed": has_failed,
+        "totals": totals,
+        "rooms": rooms,
+        "pairing": pairing_info(),
     }
 
 
@@ -180,6 +194,95 @@ def request_retry(plan_path: Path, ids: Optional[list[str]] = None) -> list[str]
     ctl.parent.mkdir(parents=True, exist_ok=True)
     ctl.write_text(json.dumps({"retry": merged}))
     return merged
+
+
+ROOM_NAME_RE = __import__("re").compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+
+
+def add_room(plan_path: Path, raw: dict[str, Any]) -> str:
+    """Create an agent room from the dashboard → .conductor/rooms.yaml overlay."""
+    from .schema import Workspace, rooms_path
+    name = str(raw.get("name") or "").strip()
+    if not ROOM_NAME_RE.match(name):
+        raise ValueError("room name must be kebab-case (a-z, 0-9, dashes)")
+    ws = Workspace.model_validate({k: raw.get(k) for k in ("image", "setup", "node") if raw.get(k)})
+    if not ws.image:
+        raise ValueError("room needs an image")
+    plan = load_plan(plan_path)
+    if name in plan.workspaces:
+        raise ValueError(f"room '{name}' already exists")
+    rp = rooms_path(plan_path)
+    overlay = (yaml.safe_load(rp.read_text()) or {}) if rp.exists() else {}
+    overlay[name] = ws.model_dump(exclude_none=True)
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    rp.write_text(yaml.safe_dump(overlay, sort_keys=False, allow_unicode=True))
+    return name
+
+
+def remove_room(plan_path: Path, name: str) -> bool:
+    from .schema import rooms_path
+    rp = rooms_path(plan_path)
+    if not rp.exists():
+        return False
+    overlay = yaml.safe_load(rp.read_text()) or {}
+    if name not in overlay:
+        return False
+    del overlay[name]
+    rp.write_text(yaml.safe_dump(overlay, sort_keys=False, allow_unicode=True))
+    return True
+
+
+def _lan_ip() -> Optional[str]:
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return None
+
+
+def pairing_info() -> Optional[dict[str, str]]:
+    """This machine's pairing code — paste it on another Conductor to connect."""
+    import base64
+    import os
+    token = os.environ.get("CONDUCTOR_TOKEN")
+    hub = os.environ.get("CONDUCTOR_HUB")
+    if not (token and hub):
+        return None
+    ip = _lan_ip() or "127.0.0.1"
+    url = f"http://{ip}:4747"
+    code = base64.urlsafe_b64encode(
+        json.dumps({"hub": url, "token": token}).encode()).decode()
+    return {"code": code, "hub": url}
+
+
+def join_mesh(plan_path: Path, code: str, start: bool = True) -> str:
+    """Consume a pairing code from another machine: persist it and start
+    lending this machine to that hub immediately."""
+    import base64
+    try:
+        data = json.loads(base64.urlsafe_b64decode(code.strip().encode()))
+        hub, token = data["hub"], data["token"]
+    except Exception:
+        raise ValueError("that doesn't look like a conductor pairing code")
+    f = plan_path.parent / ".conductor" / "mesh.json"
+    state = {"joins": []}
+    if f.exists():
+        try:
+            state = json.loads(f.read_text()) or {"joins": []}
+        except json.JSONDecodeError:
+            pass
+    if not any(j.get("hub") == hub for j in state["joins"]):
+        state["joins"].append({"hub": hub, "token": token})
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(state))
+    if start:
+        from .worker import start_background_worker
+        start_background_worker(hub, token=token, log=lambda *a: None)
+    return hub
 
 
 PLANNER_SYSTEM = """You are the planning assistant inside conductor, a scheduler that runs \
@@ -380,6 +483,7 @@ code{font:12.5px ui-monospace,Menlo,monospace;background:#fff;border:1.5px solid
       <div class="card" style="margin:0"><h2>api budget <small>usd, hard gate</small></h2><div id="budget"></div></div>
       <div class="card" style="margin:0"><h2>subscription quota <small>auto defer/downgrade</small></h2><div id="quota"></div></div>
     </div>
+    <div class="card"><h2>agents <small>who is eating the tokens</small></h2><div id="agents"></div></div>
   </section>
   <section class="view" id="v-timeline">
     <div class="vtitle">timeline</div><div class="vsub">every task's window over 24h — the red line is now</div>
@@ -423,9 +527,35 @@ code{font:12.5px ui-monospace,Menlo,monospace;background:#fff;border:1.5px solid
     <div class="card"><div id="memory"></div></div>
   </section>
   <section class="view" id="v-nodes">
-    <div class="vtitle">machines</div><div class="vsub">your own computers, joined as a mesh — schedule work onto any of them with one Claude login each</div>
-    <div class="card"><div id="nodes"></div></div>
-    <div class="card"><h2>how to add a machine</h2>
+    <div class="vtitle">machines &amp; rooms</div><div class="vsub">your computers as one orchestra — and the rooms your agents live in</div>
+    <div class="grid">
+      <div class="card" style="margin:0"><h2>this machine <small>share to connect</small></h2>
+        <div id="pairing"></div></div>
+      <div class="card" style="margin:0"><h2>join another conductor <small>paste its pairing code</small></h2>
+        <form onsubmit="return meshJoin(event)" style="display:flex;gap:8px">
+          <input id="joincode" placeholder="pairing code…" style="flex:1;font:12px ui-monospace,Menlo,monospace;padding:8px 10px;border:2.5px solid var(--ink);border-radius:9px;background:#fff">
+          <button class="bbtn" style="background:var(--gold)">join</button>
+        </form>
+        <div class="muted" id="joinmsg" style="margin-top:8px">joining lends this machine (shell + claude + rooms) to that conductor — persists across restarts</div>
+      </div>
+    </div>
+    <div class="card"><h2>connected machines</h2><div id="nodes"></div></div>
+    <div class="card"><h2>agent rooms <small>persistent containers where agents live</small></h2>
+      <div id="rooms"></div>
+      <form class="sched" id="roomform" onsubmit="return roomCreate(event)" style="margin-top:12px">
+        <div><label>name</label><input name="name" placeholder="openclaw-room" required></div>
+        <div><label>preset</label><select name="preset" onchange="roomPreset(this.value)">
+          <option value="blank">blank (alpine)</option>
+          <option value="openclaw">OpenClaw</option>
+          <option value="hermes">Hermes</option>
+        </select></div>
+        <div><label>machine</label><input name="node" placeholder="(this one)" list="nodelist"></div>
+        <div><label>image</label><input name="image" id="room-image" value="alpine:latest" required></div>
+        <textarea name="setup" id="room-setup" placeholder="one-time setup command (optional)"></textarea>
+        <button>create room</button><div id="roommsg"></div>
+      </form>
+    </div>
+    <div class="card"><h2>add a machine without the app</h2>
       <div id="meshhelp" class="muted"></div>
     </div>
   </section>
@@ -556,6 +686,41 @@ async function scheduleFromCard(btn,i){
 }
 renderChat();
 
+const PRESETS={blank:{image:"alpine:latest",setup:""},
+  openclaw:{image:"node:22-bookworm",setup:"npm install -g openclaw"},
+  hermes:{image:"python:3.12-slim",setup:"pip install hermes-agent"}};
+function roomPreset(p){const d=PRESETS[p]||PRESETS.blank;
+  document.getElementById("room-image").value=d.image;
+  document.getElementById("room-setup").value=d.setup;}
+async function roomCreate(ev){
+  ev.preventDefault();
+  const fd=new FormData(ev.target),msg=document.getElementById("roommsg");
+  const body={name:fd.get("name"),image:fd.get("image")};
+  if(fd.get("setup"))body.setup=fd.get("setup");
+  if(fd.get("node"))body.node=fd.get("node");
+  const r=await fetch("/api/rooms",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const d=await r.json();
+  msg.style.color=r.ok?"var(--ink)":"var(--red)";
+  msg.textContent=r.ok?`room "${d.name}" ready — assign it in schedule or compose`:(d.error||"failed");
+  if(r.ok){ev.target.reset();roomPreset("blank");tick();}
+  return false;
+}
+async function roomDelete(name){
+  if(!confirm(`remove room "${name}"? (the container is left as-is)`))return;
+  await fetch("/api/rooms/"+encodeURIComponent(name),{method:"DELETE"});tick();
+}
+async function meshJoin(ev){
+  ev.preventDefault();
+  const inp=document.getElementById("joincode"),msg=document.getElementById("joinmsg");
+  const r=await fetch("/api/mesh/join",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code:inp.value})});
+  const d=await r.json();
+  msg.style.color=r.ok?"var(--ink)":"var(--red)";
+  msg.textContent=r.ok?`joined ${d.hub} — this machine now takes its work`:(d.error||"failed");
+  if(r.ok)inp.value="";
+  return false;
+}
+function copyPairing(code,btn){navigator.clipboard.writeText(code);btn.textContent="copied ✓";setTimeout(()=>btn.textContent="copy",2000);}
+
 let expandedRun=null;
 async function toggleRun(i,out){
   if(!out)return;
@@ -574,7 +739,25 @@ async function tick(){
   document.getElementById("n-runs").textContent=d.ledger.length;
   document.getElementById("n-mem").textContent=d.memories.length;
   const nodes=d.nodes||[];
-  document.getElementById("n-nodes").textContent=nodes.length;
+  document.getElementById("n-nodes").textContent=nodes.length+(d.rooms?d.rooms.length:0);
+  document.getElementById("pairing").innerHTML=d.pairing?
+    `<div class="muted">other Conductors paste this code to send work here:</div>
+     <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+       <code style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">${esc(d.pairing.code)}</code>
+       <button class="bbtn" onclick="copyPairing('${esc(d.pairing.code)}',this)">copy</button></div>
+     <div class="muted" style="margin-top:6px">hub ${esc(d.pairing.hub)} · embedded, always on with the app</div>`
+    :'<div class="empty">embedded hub not running (port 4747 busy?)</div>';
+  document.getElementById("rooms").innerHTML=(d.rooms&&d.rooms.length)?
+    `<table><tr><th>room</th><th>image</th><th>machine</th><th></th></tr>`+
+    d.rooms.map(w=>`<tr><td><b>${esc(w.name)}</b>${w.setup?' <span class="tag">setup</span>':''}</td>
+      <td class="muted">${esc(w.image)}</td><td>${esc(w.node||"this machine")}</td>
+      <td><button class="del" onclick="roomDelete('${esc(w.name)}')" title="remove">✕</button></td></tr>`).join("")+"</table>"
+    :'<div class="empty">no rooms yet — create one below (OpenClaw, Hermes, or blank)</div>';
+  document.getElementById("agents").innerHTML=(d.totals&&d.totals.length)?
+    `<table><tr><th>agent / task</th><th>runs</th><th>tokens in/out</th><th>cost</th></tr>`+
+    d.totals.map(t=>`<tr><td><b>${esc(t.task_id)}</b></td><td>${t.runs}</td>
+      <td>${fmt(t.in)} / ${fmt(t.out)}</td><td>$${t.cost_usd.toFixed(4)}</td></tr>`).join("")+"</table>"
+    :'<div class="empty">no runs yet</div>';
   document.getElementById("nodelist").innerHTML=nodes.map(n=>`<option value="${esc(n.name)}">`).join("");
   const dot=on=>`<span style="display:inline-block;width:9px;height:9px;border-radius:99px;border:2px solid var(--ink);background:${on?"var(--teal)":"#ccc"};margin-right:7px"></span>`;
   document.getElementById("nodes").innerHTML=!d.hub?
@@ -721,10 +904,29 @@ def make_handler(plan_path: Path):
                     return self._json(200, {"text": text})
                 except Exception as exc:
                     return self._json(400, {"error": str(exc)})
+            if path == "/api/rooms":
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    name = add_room(plan_path, json.loads(self.rfile.read(n) or b"{}"))
+                    return self._json(201, {"ok": True, "name": name})
+                except Exception as exc:
+                    return self._json(400, {"error": str(exc)})
+            if path == "/api/mesh/join":
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(n) or b"{}")
+                    hub = join_mesh(plan_path, body.get("code") or "")
+                    return self._json(200, {"ok": True, "hub": hub})
+                except Exception as exc:
+                    return self._json(400, {"error": str(exc)})
             return self._json(404, {})
 
         def do_DELETE(self) -> None:
             path = self.path.partition("?")[0]
+            if path.startswith("/api/rooms/"):
+                if remove_room(plan_path, path.rsplit("/", 1)[1]):
+                    return self._json(200, {"ok": True})
+                return self._json(409, {"error": "not a dashboard-created room"})
             if not path.startswith("/api/tasks/"):
                 return self._json(404, {})
             task_id = path.rsplit("/", 1)[1]

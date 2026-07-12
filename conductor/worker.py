@@ -97,6 +97,18 @@ def execute_llm(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def start_background_worker(hub_url: str, token: Optional[str] = None,
+                            node: Optional[str] = None, log=print) -> None:
+    """Join a hub from inside a running app: a daemon thread that lends this
+    machine (shell + claude + rooms) to whoever owns that hub."""
+    import threading
+    threading.Thread(
+        target=run_worker,
+        kwargs=dict(hub_url=hub_url, node=node, token=token, allow_shell=True, log=log),
+        daemon=True,
+    ).start()
+
+
 def run_worker(
     hub_url: str,
     node: Optional[str] = None,

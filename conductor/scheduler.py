@@ -102,10 +102,20 @@ class Scheduler:
         self._write_state()
 
     def _refresh_inbox(self) -> None:
-        """Pick up tasks scheduled from the dashboard while we're running."""
+        """Pick up tasks AND rooms created from the dashboard while running."""
         if self.plan_path is None:
             return
-        from .schema import load_inbox_tasks
+        from .schema import Workspace, load_inbox_tasks, rooms_path
+        rp = rooms_path(self.plan_path)
+        if rp.exists():  # hot-pickup new rooms, else tasks referencing them get skipped
+            try:
+                import yaml as _yaml
+                for name, spec in (_yaml.safe_load(rp.read_text()) or {}).items():
+                    if name not in self.plan.workspaces:
+                        self.plan.workspaces[name] = Workspace.model_validate(spec)
+                        self._log(name, "scheduled", "new agent room from dashboard")
+            except Exception:
+                pass
         try:
             fresh = load_inbox_tasks(self.plan, self.plan_path)
         except Exception:

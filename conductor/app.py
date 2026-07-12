@@ -184,11 +184,69 @@ def desktop_main() -> int:
     return run_app(ensure_default_plan(), embed_scheduler=True)
 
 
+def _mesh_token(state_dir: Path) -> str:
+    """Stable per-machine mesh secret — the shared token for hub + pairing."""
+    import secrets
+    f = state_dir / "mesh-token"
+    if not f.exists():
+        state_dir.mkdir(parents=True, exist_ok=True)
+        f.write_text(secrets.token_hex(16))
+        f.chmod(0o600)
+    return f.read_text().strip()
+
+
+def _start_embedded_hub(state_dir: Path, log) -> Optional[str]:
+    """The app IS a hub: bind the work queue on :4747 so other machines can
+    join with a pairing code — no CLI. Skips quietly if the port is taken
+    (e.g. a standalone `conductor hub` is already running)."""
+    token = _mesh_token(state_dir)
+    os.environ.setdefault("CONDUCTOR_TOKEN", token)
+    try:
+        from .hub import serve as hub_serve
+        hub = hub_serve("0.0.0.0", 4747, state_dir / "hub-state.json", token)
+        threading.Thread(target=hub.serve_forever, daemon=True).start()
+        os.environ.setdefault("CONDUCTOR_HUB", "http://127.0.0.1:4747")
+        log("embedded hub on :4747")
+        return "http://127.0.0.1:4747"
+    except OSError as exc:
+        log(f"embedded hub skipped ({exc}) — using existing hub if any")
+        return None
+
+
+def _start_joined_workers(state_dir: Path, log) -> None:
+    """Reconnect to every hub this machine has joined (mesh.json) — so a
+    one-time pairing keeps working across app restarts."""
+    import json as _json
+
+    from .worker import start_background_worker
+    f = state_dir / "mesh.json"
+    if not f.exists():
+        return
+    try:
+        joins = (_json.loads(f.read_text()) or {}).get("joins", [])
+    except _json.JSONDecodeError:
+        return
+    for j in joins:
+        if j.get("hub"):
+            start_background_worker(j["hub"], token=j.get("token"), log=log)
+            log(f"rejoined mesh hub {j['hub']}")
+
+
 def run_headless(plan_path: Path, port: int, parent_pid: Optional[int] = None) -> int:
     """The engine without a window — what the Tauri shell runs as a sidecar.
-    UI server + serve-mode scheduler in this process; prints a READY line so
-    the shell knows when to show the window. If parent_pid is given, exits
-    when that process dies (no orphaned engines)."""
+    UI server + serve-mode scheduler + embedded mesh hub in this process;
+    prints a READY line so the shell knows when to show the window. If
+    parent_pid is given, exits when that process dies (no orphaned engines)."""
+    state_dir = plan_path.parent / ".conductor"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    log_file = (state_dir / "app.log").open("a")
+
+    def log(msg: str) -> None:
+        log_file.write(f"{dt.datetime.now().strftime('%H:%M:%S')} engine   {msg}\n")
+        log_file.flush()
+
+    _start_embedded_hub(state_dir, log)
+    _start_joined_workers(state_dir, log)
     server = ui_serve(load_plan(plan_path), plan_path, host="127.0.0.1", port=port)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=_scheduler_forever, args=(plan_path,), daemon=True).start()

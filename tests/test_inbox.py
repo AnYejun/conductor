@@ -154,3 +154,66 @@ def test_http_retry_endpoint(plan_file: Path):
         assert state["has_failed"] is True
     finally:
         server.shutdown()
+
+
+def test_rooms_overlay_and_api(plan_file: Path):
+    """Dashboard-created rooms merge into the plan; tasks may reference them."""
+    from conductor.ui import add_room, remove_room
+
+    add_room(plan_file, {"name": "openclaw-room", "image": "node:22",
+                         "setup": "npm i -g openclaw", "node": "homebox"})
+    plan = load_plan(plan_file)
+    assert "openclaw-room" in plan.workspaces
+    assert plan.workspaces["openclaw-room"].node == "homebox"
+
+    # an inbox task can be assigned to the room and follows its machine
+    from conductor.ui import add_inbox_task
+    add_inbox_task(plan_file, {"id": "sweep", "kind": "shell",
+                               "command": "openclaw status", "workspace": "openclaw-room"})
+    plan = load_plan(plan_file)
+    t = next(t for t in plan.tasks if t.id == "sweep")
+    assert t.runs_on == "homebox"
+
+    with pytest.raises(ValueError, match="already exists"):
+        add_room(plan_file, {"name": "openclaw-room", "image": "x"})
+    assert remove_room(plan_file, "openclaw-room")
+    assert not remove_room(plan_file, "openclaw-room")
+
+
+def test_mesh_join_persists(plan_file: Path):
+    import base64
+    import json as _json
+
+    from conductor.ui import join_mesh
+
+    code = base64.urlsafe_b64encode(_json.dumps(
+        {"hub": "http://100.64.0.9:4747", "token": "t0k"}).encode()).decode()
+    hub = join_mesh(plan_file, code, start=False)
+    assert hub == "http://100.64.0.9:4747"
+    join_mesh(plan_file, code, start=False)  # idempotent
+    saved = _json.loads((plan_file.parent / ".conductor" / "mesh.json").read_text())
+    assert len(saved["joins"]) == 1 and saved["joins"][0]["token"] == "t0k"
+
+    with pytest.raises(ValueError, match="pairing code"):
+        join_mesh(plan_file, "garbage!!!", start=False)
+
+
+def test_scheduler_hot_pickup_room_task(plan_file: Path, tmp_path: Path):
+    """A room + a task using it, both created AFTER the scheduler started,
+    must still get picked up (rooms overlay hot-reload)."""
+    import asyncio
+
+    from conductor.ledger import Ledger
+    from conductor.scheduler import Scheduler, State
+    from conductor.ui import add_inbox_task, add_room
+
+    plan = load_plan(plan_file)
+    sched = Scheduler(plan, Ledger(tmp_path / "l.json"),
+                      outputs_dir=plan_file.parent / ".conductor" / "outputs",
+                      tick_seconds=1, plan_path=plan_file)
+    add_room(plan_file, {"name": "late-room", "image": "alpine:latest"})
+    add_inbox_task(plan_file, {"id": "late-room-task", "kind": "shell",
+                               "command": "echo hi", "workspace": "late-room"})
+    sched._refresh_inbox()
+    assert "late-room" in sched.plan.workspaces
+    assert sched.state.get("late-room-task") is State.pending
