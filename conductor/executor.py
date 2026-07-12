@@ -151,7 +151,7 @@ async def _run_agentic(client, plan: Plan, task: Task, ledger: Ledger,
         return RunResult(Outcome.failed, model_key=chosen_key,
                          detail="agentic tasks run locally in v0.3 (remote agentic is roadmap)")
 
-    workspace = task.workspace or outputs_dir.parent.parent  # default: plan dir
+    workspace = task.workdir or outputs_dir.parent.parent  # default: plan dir
     workspace.mkdir(parents=True, exist_ok=True)
     memory = MemoryStore(outputs_dir.parent / "memory")
     model = plan.models[chosen_key]
@@ -221,7 +221,7 @@ async def _run_claude(plan: Plan, task: Task, ledger: Ledger, outputs_dir: Path)
             return RunResult(Outcome.failed, detail=f"{type(exc).__name__}: {exc}")
         res = item.get("result") or {}
     else:
-        workspace = task.workspace or outputs_dir.parent.parent
+        workspace = task.workdir or outputs_dir.parent.parent
         payload = build_claude_payload(task, briefing=briefing, memory_dir=memory.dir,
                                        model_override=model_override)
         res = await asyncio.to_thread(run_claude, payload, str(workspace))

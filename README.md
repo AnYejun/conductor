@@ -187,6 +187,36 @@ tasks:
 - The budget never fragments: llm usage from any node reconciles into the
   scheduler's single ledger, so remote work draws from the same daily cap.
 
+## Conduct other agents — OpenClaw, Hermes, anything
+
+Powerful open agents are scary to run bare on your machines. conductor's answer:
+give each one a **workspace** — a persistent, named container on one of your
+computers. Created once, set up once; every task execs into the same room, so
+the agent's installs, files, and state survive between runs. conductor stays
+the management plane: schedule, budget, retry, observe.
+
+```yaml
+workspaces:
+  openclaw:
+    image: node:22-bookworm
+    setup: "npm install -g openclaw"     # one-time, inside the container
+    node: homebox                        # which machine the room lives on
+
+tasks:
+  - id: inbox-sweep
+    kind: shell
+    workspace: openclaw                  # runs INSIDE the room (docker exec)
+    command: "openclaw <your agent command here>"
+    window: { earliest: "07:00", deadline: "08:00" }
+```
+
+- The room is `docker run -d --restart unless-stopped <image> sleep infinity`
+  under the hood — host stays clean, agent stays contained, state persists.
+- Tasks with a `workspace` default to the room's `node`, so the work follows
+  the machine the room lives on.
+- `container:` (one-off, `--rm`) is still there for stateless isolation;
+  `workspace:` is for agents that live somewhere.
+
 ## Run on your Claude subscription (no API key)
 
 Already paying for Claude Pro/Max? `kind: claude` runs the task through

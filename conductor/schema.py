@@ -80,7 +80,8 @@ class Task(BaseModel):
     prompt_file: Optional[Path] = None
     system: Optional[str] = None
     command: Optional[str] = None        # required for kind=shell
-    container: Optional[str] = None      # docker image to wrap a shell command in
+    container: Optional[str] = None      # docker image for ONE-OFF isolation (--rm)
+    workspace: Optional[str] = None      # persistent agent room (key into plan.workspaces)
     runs_on: Optional[str] = None        # mesh node name; None = run locally
     timeout_seconds: int = Field(default=600, gt=0)
     window: Window = Field(default_factory=Window)
@@ -91,7 +92,7 @@ class Task(BaseModel):
     # -- agentic (llm only) --
     agentic: bool = False                # multi-step tool-use loop vs single call
     tools: list[str] = Field(default_factory=list)   # subset of the tool set (empty → safe default)
-    workspace: Optional[Path] = None     # root for file/bash tools (default: plan dir)
+    workdir: Optional[Path] = None       # root for file/bash tools (default: plan dir)
     memory: bool = True                  # recall before + remember tool during
     max_steps: int = Field(default=12, gt=0)
     # -- claude (subscription executor) --
@@ -117,6 +118,10 @@ class Task(BaseModel):
                 raise ValueError(f"task '{self.id}': kind=shell needs 'command'")
             if self.container is not None and not self.container.strip():
                 raise ValueError(f"task '{self.id}': empty 'container'")
+        if self.workspace and self.kind is not Kind.shell:
+            raise ValueError(f"task '{self.id}': 'workspace' needs kind=shell (a command to run in the room)")
+        if self.workspace and self.container:
+            raise ValueError(f"task '{self.id}': pick 'workspace' (persistent) or 'container' (one-off), not both")
         if self.tools:
             from .tools import ALL_TOOLS
             bad = [t for t in self.tools if t not in ALL_TOOLS]
@@ -136,6 +141,15 @@ class Mesh(BaseModel):
     hub: Optional[str] = None  # e.g. http://100.64.0.3:4747 (falls back to $CONDUCTOR_HUB)
 
 
+class Workspace(BaseModel):
+    """A persistent, named container on one of your machines — a safe room
+    where an agent (OpenClaw, Hermes, anything) lives across tasks. Created
+    on first use (docker), set up once, then tasks exec into it."""
+    image: str                          # e.g. node:22-bookworm
+    setup: Optional[str] = None         # one-time install command inside the container
+    node: Optional[str] = None          # default mesh node for tasks using this workspace
+
+
 class Subscription(BaseModel):
     """Quota ceilings for `kind: claude` tasks (burn units = in+out+cache-write
     tokens). Anthropic doesn't publish absolute per-plan numbers — run
@@ -152,6 +166,7 @@ class Plan(BaseModel):
     tasks: list[Task]
     mesh: Mesh = Field(default_factory=Mesh)
     subscription: Subscription = Field(default_factory=Subscription)
+    workspaces: dict[str, Workspace] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _cross_check(self) -> "Plan":
@@ -163,6 +178,13 @@ class Plan(BaseModel):
         for t in self.tasks:
             if t.model is not None and t.model not in self.models:
                 raise ValueError(f"task '{t.id}': unknown model key '{t.model}'")
+            if t.workspace is not None:
+                if t.workspace not in self.workspaces:
+                    raise ValueError(f"task '{t.id}': unknown workspace '{t.workspace}' "
+                                     f"— plan has: {list(self.workspaces) or 'none'}")
+                ws = self.workspaces[t.workspace]
+                if t.runs_on is None and ws.node:
+                    t.runs_on = ws.node  # tasks follow their room's machine by default
             for dep in t.depends_on:
                 if dep not in seen:
                     raise ValueError(f"task '{t.id}': unknown dependency '{dep}'")
@@ -217,8 +239,8 @@ def _resolve_paths(t: Task, plan_path: Path) -> None:
         t.prompt_file = (plan_path.parent / t.prompt_file).resolve()
     if t.prompt_file and not t.prompt_file.exists():
         raise FileNotFoundError(f"task '{t.id}': prompt_file not found: {t.prompt_file}")
-    if t.workspace and not t.workspace.is_absolute():
-        t.workspace = (plan_path.parent / t.workspace).resolve()
+    if t.workdir and not t.workdir.is_absolute():
+        t.workdir = (plan_path.parent / t.workdir).resolve()
 
 
 def load_plan(path: Path | str, include_inbox: bool = True) -> Plan:

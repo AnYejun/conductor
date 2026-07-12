@@ -21,12 +21,44 @@ from typing import Any, Optional
 import httpx
 
 
+def ensure_workspace(ws: dict[str, Any], timeout: int = 600) -> str:
+    """Make sure the persistent agent container exists and is running.
+    Created once from ws['image'], set up once with ws['setup'], then reused
+    forever — the agent's state (installs, files, sessions) survives tasks."""
+    name = f"conductor-ws-{ws['name']}"
+    state = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", name],
+                           capture_output=True, text=True, timeout=30)
+    if state.returncode != 0:  # doesn't exist yet → create + one-time setup
+        created = subprocess.run(
+            ["docker", "run", "-d", "--name", name, "--restart", "unless-stopped",
+             ws["image"], "sleep", "infinity"],
+            capture_output=True, text=True, timeout=timeout)
+        if created.returncode != 0:
+            raise RuntimeError(f"workspace create failed: {created.stderr.strip()[:400]}")
+        if ws.get("setup"):
+            setup = subprocess.run(["docker", "exec", name, "sh", "-lc", ws["setup"]],
+                                   capture_output=True, text=True, timeout=timeout)
+            if setup.returncode != 0:
+                raise RuntimeError(f"workspace setup failed: {setup.stderr.strip()[:400]}")
+    elif state.stdout.strip() != "true":  # exists but stopped
+        subprocess.run(["docker", "start", name], capture_output=True, text=True, timeout=60)
+    return name
+
+
 def execute_shell(payload: dict[str, Any], workdir: Optional[str] = None) -> dict[str, Any]:
     """Run a shell payload locally. Used by both the worker and local kind=shell tasks."""
     command = payload["command"]
     timeout = payload.get("timeout_seconds", 600)
     container = payload.get("container")
-    if container:
+    workspace = payload.get("workspace")
+    if workspace:  # persistent agent room — exec inside it
+        try:
+            name = ensure_workspace(workspace, timeout=timeout)
+        except (RuntimeError, subprocess.SubprocessError, FileNotFoundError) as exc:
+            return {"returncode": 125, "stdout": "", "stderr": str(exc)[:4000]}
+        proc = subprocess.run(["docker", "exec", name, "sh", "-lc", command],
+                              capture_output=True, text=True, timeout=timeout)
+    elif container:  # one-off isolation
         argv = ["docker", "run", "--rm", container, "sh", "-lc", command]
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     else:

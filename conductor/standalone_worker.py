@@ -53,9 +53,44 @@ def _resolve_claude():
     return None
 
 
+def _ensure_workspace(ws, timeout=600):
+    name = "conductor-ws-" + ws["name"]
+    state = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", name],
+                           capture_output=True, text=True, timeout=30)
+    if state.returncode != 0:
+        created = subprocess.run(
+            ["docker", "run", "-d", "--name", name, "--restart", "unless-stopped",
+             ws["image"], "sleep", "infinity"],
+            capture_output=True, text=True, timeout=timeout)
+        if created.returncode != 0:
+            raise RuntimeError("workspace create failed: " + created.stderr.strip()[:400])
+        if ws.get("setup"):
+            setup = subprocess.run(["docker", "exec", name, "sh", "-lc", ws["setup"]],
+                                   capture_output=True, text=True, timeout=timeout)
+            if setup.returncode != 0:
+                raise RuntimeError("workspace setup failed: " + setup.stderr.strip()[:400])
+    elif state.stdout.strip() != "true":
+        subprocess.run(["docker", "start", name], capture_output=True, text=True, timeout=60)
+    return name
+
+
 def run_shell(payload, workdir=None):
-    proc = subprocess.run(payload["command"], shell=True, capture_output=True, text=True,
-                          timeout=payload.get("timeout_seconds", 600), cwd=workdir)
+    timeout = payload.get("timeout_seconds", 600)
+    ws = payload.get("workspace")
+    if ws:
+        try:
+            name = _ensure_workspace(ws, timeout)
+        except Exception as exc:
+            return {"returncode": 125, "stdout": "", "stderr": str(exc)[:4000]}
+        proc = subprocess.run(["docker", "exec", name, "sh", "-lc", payload["command"]],
+                              capture_output=True, text=True, timeout=timeout)
+    elif payload.get("container"):
+        proc = subprocess.run(["docker", "run", "--rm", payload["container"],
+                               "sh", "-lc", payload["command"]],
+                              capture_output=True, text=True, timeout=timeout)
+    else:
+        proc = subprocess.run(payload["command"], shell=True, capture_output=True, text=True,
+                              timeout=timeout, cwd=workdir)
     return {"returncode": proc.returncode,
             "stdout": proc.stdout[-MAX_OUT:], "stderr": proc.stderr[-30_000:]}
 

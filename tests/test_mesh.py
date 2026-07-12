@@ -127,3 +127,63 @@ tasks:
     outputs = list((tmp_path / "out").glob("local-shell-*.md"))
     assert len(outputs) == 1
     assert "scheduled-locally" in outputs[0].read_text()
+
+
+def test_workspace_schema(tmp_path: Path):
+    from conductor.schema import load_plan as lp
+    p = tmp_path / "plan.yaml"
+    p.write_text("""
+budget: {daily_usd: 1.00}
+models:
+  haiku: {id: claude-haiku-4-5, price_in: 1.00, price_out: 5.00}
+workspaces:
+  openclaw: {image: node:22, setup: "npm i -g openclaw", node: homebox}
+tasks:
+  - id: sweep
+    kind: shell
+    command: "openclaw status"
+    workspace: openclaw
+""")
+    plan = lp(p)
+    assert plan.tasks[0].runs_on == "homebox"  # follows the room's machine
+
+    bad = p.read_text().replace("workspace: openclaw", "workspace: ghost")
+    p.write_text(bad)
+    with pytest.raises(ValueError, match="unknown workspace"):
+        lp(p)
+
+
+def test_workspace_exec_with_fake_docker(tmp_path: Path, monkeypatch):
+    """First use: inspect(miss) → run(create) → exec(setup) → exec(command)."""
+    import os
+    import stat
+
+    from conductor.worker import execute_shell
+
+    log = tmp_path / "docker.log"
+    fake = tmp_path / "bin" / "docker"
+    fake.parent.mkdir()
+    fake.write_text(f"""#!/bin/bash
+echo "$@" >> {log}
+case "$1" in
+  inspect) exit 1;;
+  run) exit 0;;
+  exec) [ "$2" = "conductor-ws-room1" ] && echo "from-the-room"; exit 0;;
+  start) exit 0;;
+esac
+""")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+
+    res = execute_shell({
+        "command": "agent do-thing",
+        "timeout_seconds": 60,
+        "workspace": {"name": "room1", "image": "node:22", "setup": "npm i -g agent"},
+    })
+    assert res["returncode"] == 0
+    assert "from-the-room" in res["stdout"]
+    calls = log.read_text().splitlines()
+    assert calls[0].startswith("inspect")
+    assert calls[1].startswith("run -d --name conductor-ws-room1 --restart unless-stopped node:22")
+    assert "npm i -g agent" in calls[2]        # one-time setup
+    assert "agent do-thing" in calls[3]        # the actual task

@@ -36,6 +36,10 @@ def build_payload(plan: Plan, task: Task, model_key: Optional[str]) -> dict[str,
         payload["command"] = task.command
         if task.container:
             payload["container"] = task.container
+        if task.workspace:
+            ws = plan.workspaces[task.workspace]
+            payload["workspace"] = {"name": task.workspace, "image": ws.image,
+                                    "setup": ws.setup}
     else:
         assert model_key is not None
         payload["model_id"] = plan.models[model_key].id
